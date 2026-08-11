@@ -264,6 +264,17 @@ def main():
           "(bit-identical to the source steps), audio 37 steps, end_frame "
           "%.4f (overhang-compensated)" % (idx, got_end))
 
+    looping = sys.modules["h3mc_pkg.looping_sampler"]
+    prefix, _, _ = looping._slice_latent_prefix(prev, 107)
+    captured.clear()
+    node.apply(
+        conditioning=[["c", {}]], vae=VAE(), latent=target,
+        context_frames=context, context_length="22",
+        audio_context_length=22, context_latent=prefix)
+    snapped = captured["minimax_refs"][-1][nodes.MC_AUDIO_KEY]
+    assert abs(snapped - 21.6) < 1e-6, snapped
+    print("settling prefix: signed negative audio overhang snapped to target grid")
+
     # A looping tile may still have a hard FL2VA endpoint. Motion Context
     # replaces only its head anchors and must retain, mark and sort the end.
     captured.clear()
@@ -280,7 +291,6 @@ def main():
     assert merged[-1]["resolved_frame_index"] == 0
     print("endpoint merge: motion head retained the stock FL2VA last anchor")
 
-    looping = sys.modules["h3mc_pkg.looping_sampler"]
     first = {"resolved_frame_index": 0, "latent": "first"}
     last = {"resolved_frame_index": frames - 1, "latent": "last"}
     base = [["c", {"minimax_keyframes": [first, last],
@@ -307,7 +317,7 @@ def main():
         fake_images = T(np.zeros((tile_frames, 1, 1, 3), dtype=np.float32))
         fake_audio = T(np.zeros((1, 2, 400000), dtype=np.float32))
         _, chunk = looping._trim_decoded(
-            fake_images, fake_audio, sample_rate, trim, tile_frames,
+            fake_images, fake_audio, sample_rate, trim, 0, tile_frames,
             delivered, next_delivered)
         audio_lengths.append(chunk.shape[-1])
         delivered = next_delivered

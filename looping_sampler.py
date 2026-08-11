@@ -13,12 +13,14 @@ from comfy_api.latest import io
 from comfy_extras.nodes_custom_sampler import Guider_Basic
 
 from .nodes import (
+    AUDIO_HZ,
     FPS,
     MC_KEY,
     MiniMaxH3MotionContext,
     _ensure_layout_patch,
     _ensure_payload_patch,
     _pixel_frames,
+    _steps_for_frames,
     _streams_from_latent,
 )
 
@@ -31,6 +33,46 @@ def _autogrow_values(values, prefix):
         for name, value in (values or {}).items()
         if value is not None
     }
+
+
+def _audio_steps_for_frames(frame_count):
+    return round(frame_count / float(FPS) * AUDIO_HZ)
+
+
+def _has_hard_end_anchor(conditioning, frame_count):
+    for entry in conditioning:
+        values = entry[1]
+        source_frame_count = int(
+            values.get("minimax_frame_count", frame_count))
+        for keyframe in values.get("minimax_keyframes", []):
+            if _keyframe_position(keyframe) == source_frame_count - 1:
+                return True
+    return False
+
+
+def _slice_latent_prefix(latent, end_frames):
+    """Keep the AV latent prefix ending at an H3 pixel-frame boundary."""
+    parts = _streams_from_latent(latent)
+    if len(parts) != 2 or parts[0].ndim != 5 or parts[1].ndim != 4:
+        raise ValueError(
+            "h3_motion_context: expected an H3 joint AV latent to slice")
+    video, audio = parts
+    video_steps = _steps_for_frames(int(end_frames))
+    if video_steps is None:
+        raise ValueError(
+            "h3_motion_context: settling-tail cut at %d frames is not a "
+            "whole H3 video latent boundary" % end_frames)
+    audio_steps = _audio_steps_for_frames(int(end_frames))
+    if video_steps > video.shape[2] or audio_steps > audio.shape[-1]:
+        raise ValueError(
+            "h3_motion_context: settling-tail cut at %d frames exceeds the "
+            "available AV latent" % end_frames)
+    out = latent.copy()
+    out["samples"] = type(latent["samples"])([
+        video[:, :, :video_steps].clone(),
+        audio[:, :, :, :audio_steps].clone(),
+    ])
+    return out, video_steps, audio_steps
 
 
 def _copy_latent(latent, device=None):
@@ -143,20 +185,21 @@ def _decode_audio(audio_vae, latent):
     return waveform, sample_rate
 
 
-def _trim_decoded(images, waveform, sample_rate, trim_frames, frame_count,
-                  delivered_start, delivered_end):
+def _trim_decoded(images, waveform, sample_rate, head_trim, tail_trim,
+                  frame_count, delivered_start, delivered_end):
     if images.shape[0] < frame_count:
         raise ValueError(
             "h3_motion_context: video VAE decoded %d frames, expected %d"
             % (images.shape[0], frame_count))
-    images = images[trim_frames:frame_count]
-    start = round(trim_frames / FPS * sample_rate)
+    end = frame_count - tail_trim
+    images = images[head_trim:end]
+    start = round(head_trim / FPS * sample_rate)
     want = (round(delivered_end / FPS * sample_rate)
             - round(delivered_start / FPS * sample_rate))
     if waveform.shape[-1] < start + want:
         raise ValueError(
             "h3_motion_context: audio VAE decoded %.4fs, but this tile needs "
-            "%.4fs after its context head"
+            "%.4fs after its context and settling trims"
             % (waveform.shape[-1] / sample_rate,
                frame_count / FPS))
     return images.cpu(), waveform[..., start:start + want].cpu()
@@ -238,6 +281,15 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                             "length and resolution define every tile."),
                 io.Int.Input("tiles", default=3, min=1, max=64),
                 io.Combo.Input("context_frames", options=["22", "5", "39", "56"], default="22"),
+                io.Int.Input(
+                    "settling_tail_frames", default=0, min=0, max=4096,
+                    step=17,
+                    tooltip=(
+                        "For anchored intermediate tiles, remove this many "
+                        "17-frame-grid frames from the endpoint and use the "
+                        "earlier motion as the next tile's context. 0 keeps "
+                        "the original behavior. The final tile is never "
+                        "trimmed.")),
                 io.Int.Input("seed", default=0, min=0,
                              max=0xffffffffffffffff,
                              control_after_generate=True),
@@ -281,9 +333,14 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
     def execute(cls, model, positive, vae, audio_vae, sampler, sigmas,
                 latent, tiles, context_frames, seed,
                 prompt_conditionings=None, tile_conditionings=None,
-                tile_latents=None):
+                tile_latents=None, settling_tail_frames=0):
         tiles = int(tiles)
         context_frames = int(context_frames)
+        settling_tail_frames = int(settling_tail_frames)
+        if settling_tail_frames < 0 or settling_tail_frames % 17:
+            raise ValueError(
+                "h3_motion_context: settling_tail_frames must be a "
+                "non-negative multiple of 17")
         parts = _streams_from_latent(latent)
         if len(parts) != 2 or parts[0].ndim != 5 or parts[1].ndim != 4:
             raise ValueError(
@@ -350,27 +407,48 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             conditioning = _conditioning_for_tile(
                 source, tile_index, tiles, frame_count, tile_specific)
             target = _copy_latent(targets[tile_index])
-            trim_frames = 0
+            head_trim = 0
             if previous is not None:
                 conditioning, trim_frames = MiniMaxH3MotionContext().apply(
                     conditioning=conditioning, vae=vae, latent=target,
                     context_length=str(context_frames),
                     audio_context_length=0, context_latent=previous)
+                head_trim = trim_frames
+            tail_trim = 0
+            has_end_anchor = (
+                tile_index < tiles - 1 and tile_specific
+                and _has_hard_end_anchor(source, frame_count))
+            if has_end_anchor:
+                if settling_tail_frames + context_frames >= frame_count:
+                    raise ValueError(
+                        "h3_motion_context: settling tail plus context must "
+                        "be shorter than tile %d (%d frames)"
+                        % (tile_index + 1, frame_count))
+                tail_trim = settling_tail_frames
             tile_seed = (int(seed) + tile_index) & 0xffffffffffffffff
             _LOG.info(
-                "h3_motion_context: sampling tile %d/%d, %d frames, trim %d, "
-                "seed %d", tile_index + 1, tiles, frame_count, trim_frames,
-                tile_seed)
+                "h3_motion_context: sampling tile %d/%d, %d frames, head "
+                "trim %d, settling trim %d, seed %d", tile_index + 1, tiles,
+                frame_count, head_trim, tail_trim, tile_seed)
             sampled = _sample_tile(
                 model, conditioning, sampler, sigmas, target, tile_seed)
-            previous = _copy_latent(sampled, device="cpu")
-            sampled_tiles.append((previous, trim_frames, frame_count))
+            sampled = _copy_latent(sampled, device="cpu")
+            previous = sampled
+            if tail_trim:
+                previous, video_steps, audio_steps = _slice_latent_prefix(
+                    sampled, frame_count - tail_trim)
+                _LOG.info(
+                    "h3_motion_context: tile %d context prefix ends at %d "
+                    "frames (video latent steps %d, audio latent steps %d)",
+                    tile_index + 1, frame_count - tail_trim, video_steps,
+                    audio_steps)
+            sampled_tiles.append((sampled, head_trim, tail_trim, frame_count))
 
         image_chunks = []
         audio_chunks = []
         sample_rate = None
         delivered_start = 0
-        for tile_index, (sampled, trim_frames, frame_count) in enumerate(sampled_tiles):
+        for tile_index, (sampled, head_trim, tail_trim, frame_count) in enumerate(sampled_tiles):
             comfy.model_management.throw_exception_if_processing_interrupted()
             images = _decode_video(vae, sampled)
             waveform, tile_sample_rate = _decode_audio(audio_vae, sampled)
@@ -379,9 +457,9 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             elif sample_rate != tile_sample_rate:
                 raise ValueError(
                     "h3_motion_context: audio sample rate changed between tiles")
-            delivered_end = delivered_start + frame_count - trim_frames
+            delivered_end = delivered_start + frame_count - head_trim - tail_trim
             images, waveform = _trim_decoded(
-                images, waveform, sample_rate, trim_frames, frame_count,
+                images, waveform, sample_rate, head_trim, tail_trim, frame_count,
                 delivered_start, delivered_end)
             image_chunks.append(images)
             audio_chunks.append(waveform)
@@ -396,8 +474,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
         std[std < 1.0] = 1.0
         waveform /= std
         delivered_frames = sum(
-            frame_count - trim_frames
-            for _, trim_frames, frame_count in sampled_tiles)
+            frame_count - head_trim - tail_trim
+            for _, head_trim, tail_trim, frame_count in sampled_tiles)
         if images.shape[0] != delivered_frames:
             raise RuntimeError(
                 "h3_motion_context: assembled %d frames, planned %d"

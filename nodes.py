@@ -325,12 +325,12 @@ def _audio_tail_from_latent(latent, a_frames):
 
     Returns (tail latent [1, C, 2, rt], rt, overhang) where rt counts
     40 Hz latent steps and overhang is the fraction of a step by which the
-    clip's audio grid extends past its last pixel frame. H3 rounds the
-    audio grid UP (124 frames want 206.67 steps, the layout allocates
-    207), so the latent's final step reaches ~overhang/40 s beyond the
-    last frame. The decoded-audio path never sees this because match_tail
-    cuts it; on this path the caller compensates the placement with it,
-    so the pinned content lands exactly where its samples actually sit.
+    clip's audio grid is rounded to the nearest whole step (124 frames want
+    206.67 steps, the layout allocates 207; a shorter prefix can round down),
+    so the latent's final step may sit slightly beyond or before its pixel
+    endpoint. The decoded-audio path never sees this because match_tail cuts
+    it; on this path the caller compensates the placement with the signed
+    overhang, so the pinned content lands where its samples actually sit.
     """
     parts = _streams_from_latent(latent)
     if len(parts) < 2:
@@ -348,7 +348,7 @@ def _audio_tail_from_latent(latent, a_frames):
     total_t = int(audio.shape[-1])
     frames = _pixel_frames(int(video.shape[2]))
     overhang = total_t - FRAME_RESCALE * frames
-    if not (0.0 <= overhang < 1.0):
+    if not (-1.0 < overhang < 1.0):
         _LOG.warning(
             "h3_motion_context: context_latent audio grid is unexpected "
             "(%d steps for %d frames); assuming no overhang.", total_t, frames)
@@ -674,14 +674,12 @@ class MiniMaxH3MotionContextTrim:
     follows whatever the encoder actually produced.
 
     The tail needs the same treatment for a different reason. H3's audio
-    latent runs at 40 Hz against 24 fps picture, and FRAME_RESCALE is 5/3,
-    so a 124 frame clip wants 206.67 audio steps and the layout rounds up
-    to 207. Every clip therefore ships about 8.3 ms more sound than
-    picture. Concatenate two and the second seam is out by 16.7 ms, three
-    and it is 25 ms, and the error grows without bound down a chain. It
-    reads as a faint dampening at the first join and a short click at
-    later ones. Truncating the tail to exactly frames/fps stops it
-    accumulating.
+    latent runs at 40 Hz against 24 fps picture, and FRAME_RESCALE is 5/3.
+    The audio grid is rounded to the nearest whole step, so a prefix can be
+    a fraction of a step short or long relative to its video endpoint. The
+    timeline placement keeps that signed fractional overhang and then snaps
+    the reference endpoint to the target audio grid. Truncating decoded
+    audio to exactly frames/fps stops the residual from accumulating.
     """
 
     @classmethod

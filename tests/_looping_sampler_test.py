@@ -106,6 +106,32 @@ def main():
     assert audio["waveform"].shape[-1] == round(379 / 24 * 32000)
     assert last_latent["samples"].unbind()[0].device.type == "cpu"
 
+    try:
+        looping.MiniMaxH3LoopingSampler.execute(
+            model=object(), positive=[[torch.zeros((1, 1)), {}]],
+            vae=VideoVAE(), audio_vae=AudioVAE(), sampler=object(),
+            sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
+            context_frames="22", seed=100, settling_tail_frames=1)
+    except ValueError as error:
+        assert "multiple of 17" in str(error)
+    else:
+        raise AssertionError("off-grid settling tail was accepted")
+
+    indexed = {
+        "samples": comfy.nested_tensor.NestedTensor([
+            torch.arange(1 * 24 * 37 * 2 * 2).reshape(1, 24, 37, 2, 2),
+            torch.arange(1 * 32 * 2 * 207).reshape(1, 32, 2, 207),
+        ])
+    }
+    prefix, video_steps, audio_steps = looping._slice_latent_prefix(
+        indexed, 107)
+    assert (video_steps, audio_steps) == (32, 178)
+    assert torch.equal(prefix["samples"].unbind()[0],
+                       indexed["samples"].unbind()[0][:, :, :32])
+    assert torch.equal(prefix["samples"].unbind()[1],
+                       indexed["samples"].unbind()[1][:, :, :, :178])
+    print("settling trim: 107 frames selects video step 32 and audio step 178")
+
     first_values = calls[0][1][0][1]
     second_values = calls[1][1][0][1]
     assert first_values["prompt"].endswith("Wide road shot.")
@@ -114,6 +140,69 @@ def main():
     assert len(second_values["minimax_keyframes"]) == 7
     assert len(second_values["minimax_refs"]) == 1
     assert second_values["minimax_refs"][0]["kind"] == "audio"
+
+    def anchored(frame_count):
+        return [["c", {
+            "minimax_frame_count": frame_count,
+            "minimax_keyframes": [
+                {"resolved_frame_index": 0},
+                {"resolved_frame_index": frame_count - 1},
+            ],
+        }]]
+
+    def unanchored(frame_count):
+        return [["c", {"minimax_frame_count": frame_count}]]
+
+    original_context_apply = looping.MiniMaxH3MotionContext.apply
+    context_latents = []
+
+    def fake_context(self, conditioning, vae, latent, context_length,
+                     audio_context_length=0, context_latent=None, **kwargs):
+        context_latents.append(context_latent)
+        return conditioning, int(context_length)
+
+    looping.MiniMaxH3MotionContext.apply = fake_context
+    calls.clear()
+    context_latents.clear()
+    anchored_result = looping.MiniMaxH3LoopingSampler.execute(
+        model=object(), positive=unanchored(124), vae=VideoVAE(),
+        audio_vae=AudioVAE(), sampler=object(), sigmas=torch.tensor([1.0, 0.0]),
+        latent=latent, tiles=3, context_frames="22", seed=100,
+        tile_latents=tile_latents,
+        tile_conditionings={
+            "tile_conditioning_0": anchored(124),
+            "tile_conditioning_1": anchored(141),
+            "tile_conditioning_2": anchored(158),
+        }, settling_tail_frames=17)
+    _, anchored_audio, _, anchored_frames = anchored_result.args
+    assert anchored_frames == (124 - 17) + (141 - 22 - 17) + (158 - 22)
+    assert anchored_audio["waveform"].shape[-1] == round(
+        anchored_frames / 24 * 32000)
+    assert [tuple(item["samples"].unbind()[0].shape[2:])
+            for item in context_latents] == [(32, 2, 2), (37, 2, 2)]
+    assert [item["samples"].unbind()[1].shape[-1]
+            for item in context_latents] == [178, 207]
+    print("anchored intermediate tiles: endpoint tail removed, final tile kept")
+
+    calls.clear()
+    context_latents.clear()
+    plain_result = looping.MiniMaxH3LoopingSampler.execute(
+        model=object(), positive=unanchored(124), vae=VideoVAE(),
+        audio_vae=AudioVAE(), sampler=object(), sigmas=torch.tensor([1.0, 0.0]),
+        latent=latent, tiles=3, context_frames="22", seed=100,
+        tile_latents=tile_latents,
+        tile_conditionings={
+            "tile_conditioning_0": unanchored(124),
+            "tile_conditioning_1": unanchored(141),
+            "tile_conditioning_2": anchored(158),
+        }, settling_tail_frames=17)
+    _, plain_audio, _, plain_frames = plain_result.args
+    assert plain_frames == 379
+    assert plain_audio["waveform"].shape[-1] == round(379 / 24 * 32000)
+    assert [tuple(item["samples"].unbind()[0].shape[2:])
+            for item in context_latents] == [(37, 2, 2), (42, 2, 2)]
+    looping.MiniMaxH3MotionContext.apply = original_context_apply
+    print("unanchored intermediate tiles: settling trim left disabled")
     print("looping sampler: 3 tiles, deterministic seeds, motion context, "
           "and exact AV duration passed")
 

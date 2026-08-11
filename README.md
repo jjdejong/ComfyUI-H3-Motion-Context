@@ -32,6 +32,14 @@ context, the first tile contributes its full length and each later tile adds
 that tile's length minus 22. The output `frame_count` reports the exact
 assembled length.
 
+`settling_tail_frames` defaults to 0. Set it to a non-negative multiple of 17
+when an intermediate tile has a hard last-frame image that makes H3 settle:
+the tile is cut at the earlier motion frame, and that same AV latent prefix is
+used as the next tile's context. The setting applies only to anchored
+intermediate tiles; unanchored motion and the final tile are left intact. The
+audio prefix uses H3's 40 Hz grid (`round(frames * 40 / 24)`), while decoded
+audio is accumulated with the same global sample rounding as the video.
+
 The looping node currently supports batch size 1. It returns the last sampled
 joint AV latent as `last_tile_latent`, so another run can continue from the
 actual model output without a decode/re-encode round trip.
@@ -41,7 +49,9 @@ actual model output without a decode/re-encode round trip.
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
 after installing this pack and restart ComfyUI if necessary. It demonstrates
 three variable-length tiles (124, 141, and 158 frames) with the recommended
-22-frame context. The H3 example
+22-frame context. The settling-tail control defaults to 0 in the sample;
+after wiring hard last-frame images to intermediate tiles, set it to 17 to
+demonstrate the earlier motion cut. The H3 example
 uses one global text node, three tile text nodes, and three
 `StringConcatenate` nodes. Each concatenated prompt feeds its own stock H3
 Image-to-Video conditioning node, so every tile has independent `first_frame`
@@ -85,6 +95,16 @@ prompt. For strict base-mode H3 formatting, start the shared global text with
 `integrated_multimodal_description:` and let each tile append its own `[Shot 1]`
 description followed by exactly one `overall_soundscape:` and one
 `non_diegetic_music:` field. The example workflow uses this form.
+
+For an intermediate tile with a hard end image, make the image and prompt
+describe active motion at the boundary: constant subject speed, rotating
+wheels or an ongoing gait, persistent spray/cloth/hair motion, and camera
+movement maintained through the final frame. Avoid endpoint wording that
+suggests completion or rest, including "finishes", "arrives", "reaches",
+"settles", "centered", "balanced composition", "slows", or fading music or
+engine sound. This reduces anticipatory deceleration but cannot override a
+last image that depicts rest; choose an intermediate last keyframe with
+mid-motion visual cues. The final tile may intentionally settle.
 
 **MiniMax H3 Multi-Prompt Provider** remains available for text-only tiles. It
 prepends one global prompt to a `|`-separated prompt list and returns the

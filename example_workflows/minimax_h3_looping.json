@@ -104,7 +104,7 @@
       "inputs": [{"name": "value", "type": "STRING", "link": null, "widget": {"name": "value"}}],
       "outputs": [{"name": "STRING", "type": "STRING", "links": [14]}],
       "properties": {"Node name for S&R": "PrimitiveStringMultiline"},
-      "widgets_values": ["[Shot 1] The opening frame presents a medium-wide view of the silver station wagon entering from the left. The camera tracks forward with small amplitude at slow speed as the wagon travels toward a distant bend; sea mist drifts across the wet asphalt and the driver holds a steady course. At the final frame, the wagon reaches the foreground third of the road and its front wheels angle slightly toward the bend.\n\noverall_soundscape: Low engine hum, tires whispering over wet asphalt, close surf, light wind through roadside grass, and two distant gull calls.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with a quiet sustained cello tone and no rhythmic swell."],
+      "widgets_values": ["[Shot 1] The opening frame presents a medium-wide view of the silver station wagon entering from the left. The wagon travels at constant speed with its front wheels rotating continuously; tire spray persists on the wet asphalt while sea mist drifts across the road and the driver holds a steady course. The camera tracks forward with small amplitude at slow speed and maintains this movement through the final frame, where the wagon remains in the foreground third with its wheels still angled toward the bend.\n\noverall_soundscape: Steady engine tone, tires whispering over wet asphalt, close surf, light wind through roadside grass, and two distant gull calls.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with a quiet sustained cello tone and a steady musical bed."],
       "title": "Tile 1 prompt"
     },
     {
@@ -118,7 +118,7 @@
       "inputs": [{"name": "value", "type": "STRING", "link": null, "widget": {"name": "value"}}],
       "outputs": [{"name": "STRING", "type": "STRING", "links": [15]}],
       "properties": {"Node name for S&R": "PrimitiveStringMultiline"},
-      "widgets_values": ["[Shot 1] The opening frame presents a medium tracking view as the silver station wagon passes a weathered guardrail. The camera trucks right with small amplitude at slow speed while the wagon follows the coastal curve; reflections tremble in the wet pavement and the sea remains visible beyond the barrier. At the final frame, the wagon is centered beside the guardrail with a clear view toward the next bend.\n\noverall_soundscape: Even engine tone, tire spray, shallow surf, damp grass moving in the wind, and a single gull call passing from left to right.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with low cello entering gradually and no percussion."],
+      "widgets_values": ["[Shot 1] The opening frame presents a medium tracking view as the silver station wagon passes a weathered guardrail. The wagon moves at constant speed with rotating wheels and persistent tire spray; damp grass and loose mist move in the wind while the sea remains visible beyond the barrier. The camera trucks right with small amplitude at slow speed and maintains this lateral motion through the final frame, where the wagon is still moving beside the guardrail with the wheels turning toward the coastal curve.\n\noverall_soundscape: Even engine tone, tire spray, shallow surf, damp grass moving in the wind, and a single gull call passing from left to right.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with low cello sustained underneath and no percussion."],
       "title": "Tile 2 prompt"
     },
     {
@@ -132,7 +132,7 @@
       "inputs": [{"name": "value", "type": "STRING", "link": null, "widget": {"name": "value"}}],
       "outputs": [{"name": "STRING", "type": "STRING", "links": [16]}],
       "properties": {"Node name for S&R": "PrimitiveStringMultiline"},
-      "widgets_values": ["[Shot 1] The opening frame presents a wide view of the coastal road bending toward the bright horizon. The camera pulls out with small amplitude at slow speed as the silver station wagon moves from the foreground toward the open seascape; the guardrail leads the eye into the distance and pale dawn light spreads across the water. At the final frame, the wagon is small near the bend and the road, sea, mist, and horizon form a clean balanced composition.\n\noverall_soundscape: The engine recedes along wet asphalt while surf rolls below the road, wind brushes the guardrail, and distant gulls remain faint.\n\nnon_diegetic_music: Sustained cello and widely spaced felt-piano notes at a slow tempo, fading gently without a final accent."],
+      "widgets_values": ["[Shot 1] The opening frame presents a wide view of the coastal road bending toward the bright horizon. The silver station wagon moves at constant speed from the foreground toward the open seascape; its wheels rotate, tire spray persists, and pale dawn light spreads across the water. The camera pulls out with small amplitude at slow speed and maintains the pullout through the final frame, with the wagon still traveling near the bend and the guardrail, sea, and mist all in motion.\n\noverall_soundscape: Steady engine tone receding along wet asphalt, surf rolling below the road, wind brushing the guardrail, and distant gulls remaining audible.\n\nnon_diegetic_music: Sustained cello and widely spaced felt-piano notes at a slow tempo with an uninterrupted musical bed."],
       "title": "Tile 3 prompt"
     },
     {
@@ -213,7 +213,7 @@
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
-        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a medium-wide view of the silver station wagon entering from the left. The camera tracks forward with small amplitude at slow speed as the wagon travels toward a distant bend; sea mist drifts across the wet asphalt and the driver holds a steady course. At the final frame, the wagon reaches the foreground third of the road and its front wheels angle slightly toward the bend.\n\noverall_soundscape: Low engine hum, tires whispering over wet asphalt, close surf, light wind through roadside grass, and two distant gull calls.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with a quiet sustained cello tone and no rhythmic swell.",
+        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a medium-wide view of the silver station wagon entering from the left. The wagon travels at constant speed with its front wheels rotating continuously; tire spray persists on the wet asphalt while sea mist drifts across the road and the driver holds a steady course. The camera tracks forward with small amplitude at slow speed and maintains this movement through the final frame, where the wagon remains in the foreground third with its wheels still angled toward the bend.\n\noverall_soundscape: Steady engine tone, tires whispering over wet asphalt, close surf, light wind through roadside grass, and two distant gull calls.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with a quiet sustained cello tone and a steady musical bed.",
         960,
         544,
         124
@@ -244,7 +244,7 @@
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
-        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a medium tracking view as the silver station wagon passes a weathered guardrail. The camera trucks right with small amplitude at slow speed while the wagon follows the coastal curve; reflections tremble in the wet pavement and the sea remains visible beyond the barrier. At the final frame, the wagon is centered beside the guardrail with a clear view toward the next bend.\n\noverall_soundscape: Even engine tone, tire spray, shallow surf, damp grass moving in the wind, and a single gull call passing from left to right.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with low cello entering gradually and no percussion.",
+        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a medium tracking view as the silver station wagon passes a weathered guardrail. The wagon moves at constant speed with rotating wheels and persistent tire spray; damp grass and loose mist move in the wind while the sea remains visible beyond the barrier. The camera trucks right with small amplitude at slow speed and maintains this lateral motion through the final frame, where the wagon is still moving beside the guardrail with the wheels turning toward the coastal curve.\n\noverall_soundscape: Even engine tone, tire spray, shallow surf, damp grass moving in the wind, and a single gull call passing from left to right.\n\nnon_diegetic_music: Sparse felt-piano notes at a slow tempo with low cello sustained underneath and no percussion.",
         960,
         544,
         141
@@ -275,7 +275,7 @@
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
-        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a wide view of the coastal road bending toward the bright horizon. The camera pulls out with small amplitude at slow speed as the silver station wagon moves from the foreground toward the open seascape; the guardrail leads the eye into the distance and pale dawn light spreads across the water. At the final frame, the wagon is small near the bend and the road, sea, mist, and horizon form a clean balanced composition.\n\noverall_soundscape: The engine recedes along wet asphalt while surf rolls below the road, wind brushes the guardrail, and distant gulls remain faint.\n\nnon_diegetic_music: Sustained cello and widely spaced felt-piano notes at a slow tempo, fading gently without a final accent.",
+        "integrated_multimodal_description: Live-action, cinematic, natural dawn on a quiet coastal road beside the sea. A silver station wagon travels on wet asphalt beside gray-blue water. Fixed visual facts for this tile: low sea mist, road-height camera, muted blue-gray and silver palette, naturalistic motion, and restrained photographic detail.\n\n[Shot 1] The opening frame presents a wide view of the coastal road bending toward the bright horizon. The silver station wagon moves at constant speed from the foreground toward the open seascape; its wheels rotate, tire spray persists, and pale dawn light spreads across the water. The camera pulls out with small amplitude at slow speed and maintains the pullout through the final frame, with the wagon still traveling near the bend and the guardrail, sea, and mist all in motion.\n\noverall_soundscape: Steady engine tone receding along wet asphalt, surf rolling below the road, wind brushing the guardrail, and distant gulls remaining audible.\n\nnon_diegetic_music: Sustained cello and widely spaced felt-piano notes at a slow tempo with an uninterrupted musical bed.",
         960,
         544,
         158
@@ -326,6 +326,7 @@
         {"name": "latent", "type": "LATENT", "link": 23},
         {"name": "tiles", "type": "INT", "widget": {"name": "tiles"}, "link": null},
         {"name": "context_frames", "type": "COMBO", "widget": {"name": "context_frames"}, "link": null},
+        {"name": "settling_tail_frames", "type": "INT", "widget": {"name": "settling_tail_frames"}, "link": null},
         {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
         {"name": "prompt_conditionings", "type": "CONDITIONING", "link": null},
         {"name": "tile_latent_0", "type": "LATENT", "link": 30},
@@ -342,7 +343,7 @@
         {"name": "frame_count", "type": "INT", "links": []}
       ],
       "properties": {"Node name for S&R": "MiniMaxH3LoopingSampler"},
-      "widgets_values": [3, "22", 424242]
+      "widgets_values": [3, "22", 0, 424242]
     },
     {
       "id": 18,
