@@ -26,9 +26,11 @@ _LOG = logging.getLogger("h3_motion_context")
 
 
 def _autogrow_values(values, prefix):
-    values = values or {}
-    return [values[name] for name in sorted(
-        values, key=lambda name: int(name.removeprefix(prefix)))]
+    return {
+        int(name.removeprefix(prefix)): value
+        for name, value in (values or {}).items()
+        if value is not None
+    }
 
 
 def _copy_latent(latent, device=None):
@@ -247,6 +249,17 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                         "The final item repeats if fewer prompts than tiles "
                         "are supplied.")),
                 io.Autogrow.Input(
+                    "tile_latents",
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Latent.Input(
+                            "tile_latent",
+                            tooltip="The AV latent shape for this tile."),
+                        prefix="tile_latent_", min=0, max=64),
+                    optional=True,
+                    tooltip=(
+                        "Optional per-tile H3 AV latents. Their lengths may "
+                        "differ, but their spatial dimensions must match.")),
+                io.Autogrow.Input(
                     "tile_conditionings", template=conditioning_template,
                     optional=True,
                     tooltip="Overrides the default conditioning by tile. "
@@ -264,7 +277,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
     @classmethod
     def execute(cls, model, positive, vae, audio_vae, sampler, sigmas,
                 latent, tiles, context_frames, seed,
-                prompt_conditionings=None, tile_conditionings=None):
+                prompt_conditionings=None, tile_conditionings=None,
+                tile_latents=None):
         tiles = int(tiles)
         context_frames = int(context_frames)
         parts = _streams_from_latent(latent)
@@ -274,25 +288,52 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
         if parts[0].shape[0] != 1 or parts[1].shape[0] != 1:
             raise ValueError(
                 "h3_motion_context: looping currently supports batch size 1")
-        frame_count = _pixel_frames(int(parts[0].shape[2]))
-        if context_frames >= frame_count:
-            raise ValueError(
-                "h3_motion_context: context_frames must be shorter than the "
-                "tile (%d frames)" % frame_count)
-
         overrides = _autogrow_values(
             tile_conditionings, "tile_conditioning_")
+        latent_overrides = _autogrow_values(tile_latents, "tile_latent_")
         prompt_conditionings = prompt_conditionings or []
-        if len(overrides) > tiles:
+        if any(index >= tiles for index in overrides):
             raise ValueError(
-                "h3_motion_context: %d tile conditionings supplied for %d tiles"
-                % (len(overrides), tiles))
+                "h3_motion_context: tile conditioning index exceeds the "
+                "%d requested tiles" % tiles)
+        if any(index >= tiles for index in latent_overrides):
+            raise ValueError(
+                "h3_motion_context: tile latent index exceeds the %d "
+                "requested tiles" % tiles)
+
+        targets = []
+        frame_counts = []
+        for tile_index in range(tiles):
+            target = latent_overrides.get(tile_index, latent)
+            target_parts = _streams_from_latent(target)
+            if (len(target_parts) != 2 or target_parts[0].ndim != 5
+                    or target_parts[1].ndim != 4):
+                raise ValueError(
+                    "h3_motion_context: tile %d latent is not an H3 joint "
+                    "AV latent" % (tile_index + 1))
+            if target_parts[0].shape[0] != 1 or target_parts[1].shape[0] != 1:
+                raise ValueError(
+                    "h3_motion_context: looping currently supports batch size 1")
+            if (target_parts[0].shape[1] != parts[0].shape[1]
+                    or target_parts[0].shape[-2:] != parts[0].shape[-2:]
+                    or target_parts[1].shape[1:3] != parts[1].shape[1:3]):
+                raise ValueError(
+                    "h3_motion_context: tile %d latent spatial shape does "
+                    "not match the first tile" % (tile_index + 1))
+            targets.append(target)
+            frame_counts.append(_pixel_frames(int(target_parts[0].shape[2])))
+
+        if context_frames >= min(frame_counts):
+            raise ValueError(
+                "h3_motion_context: context_frames must be shorter than "
+                "every tile (%d frames minimum)" % min(frame_counts))
 
         sampled_tiles = []
         previous = None
         for tile_index in range(tiles):
             comfy.model_management.throw_exception_if_processing_interrupted()
-            if tile_index < len(overrides):
+            tile_specific = tile_index in overrides
+            if tile_specific:
                 source = overrides[tile_index]
                 tile_specific = True
             elif prompt_conditionings:
@@ -302,9 +343,10 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             else:
                 source = positive
                 tile_specific = False
+            frame_count = frame_counts[tile_index]
             conditioning = _conditioning_for_tile(
                 source, tile_index, tiles, frame_count, tile_specific)
-            target = _copy_latent(latent)
+            target = _copy_latent(targets[tile_index])
             trim_frames = 0
             if previous is not None:
                 conditioning, trim_frames = MiniMaxH3MotionContext().apply(
@@ -319,13 +361,13 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             sampled = _sample_tile(
                 model, conditioning, sampler, sigmas, target, tile_seed)
             previous = _copy_latent(sampled, device="cpu")
-            sampled_tiles.append((previous, trim_frames))
+            sampled_tiles.append((previous, trim_frames, frame_count))
 
         image_chunks = []
         audio_chunks = []
         sample_rate = None
         delivered_start = 0
-        for tile_index, (sampled, trim_frames) in enumerate(sampled_tiles):
+        for tile_index, (sampled, trim_frames, frame_count) in enumerate(sampled_tiles):
             comfy.model_management.throw_exception_if_processing_interrupted()
             images = _decode_video(vae, sampled)
             waveform, tile_sample_rate = _decode_audio(audio_vae, sampled)
@@ -350,8 +392,9 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
         std = torch.std(waveform, dim=[1, 2], keepdim=True) * 5.0
         std[std < 1.0] = 1.0
         waveform /= std
-        delivered_frames = frame_count + (tiles - 1) * (
-            frame_count - context_frames)
+        delivered_frames = sum(
+            frame_count - trim_frames
+            for _, trim_frames, frame_count in sampled_tiles)
         if images.shape[0] != delivered_frames:
             raise RuntimeError(
                 "h3_motion_context: assembled %d frames, planned %d"

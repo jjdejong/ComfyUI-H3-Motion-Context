@@ -3,10 +3,12 @@
 Chain MiniMax H3 clips so motion and sound keep going across the cut.
 
 The **MiniMax H3 Looping Sampler** runs that chain inside one execution.
-Give it one stock H3 AV latent as the tile shape, a sampler and sigmas, and
-the number of tiles. It samples every tile before loading the VAEs, carries
-the previous joint video/audio latent directly into the next tile, trims the
-pinned head from both decoded streams, and returns one synchronized clip.
+Give it the first stock H3 AV latent, a sampler and sigmas, and the number of
+tiles. Optional `tile_latent_0`, `tile_latent_1`, ... inputs let each tile use
+its own H3 length; all tile latents must share the first tile's spatial shape.
+It samples every tile before loading the VAEs, carries the previous joint
+video/audio latent directly into the next tile, trims the pinned head from
+both decoded streams, and returns one synchronized clip.
 
 The default conditioning supplies the first anchor of tile 1 and the last
 anchor of the final tile. Add `tile_conditioning_N` sockets when a tile needs
@@ -15,17 +17,17 @@ conditioning nodes: this preserves both the VAE anchor and the text encoder's
 image tokens. A tile-specific first anchor is ignored after tile 1 because the
 sampled motion context owns that boundary.
 
-`tile_conditioning_1` belongs to tile 1, and so on; tiles without an override
-use the default. If an override has a last frame, that frame is the tile's hard
-FL2VA endpoint and its generated tail becomes the next tile's motion context.
+The dynamic sockets are zero-based: `tile_conditioning_0` belongs to tile 1,
+`tile_conditioning_1` to tile 2, and so on. Tiles without an override use the
+default. If an override has a last frame, that frame is the tile's hard FL2VA
+endpoint and its generated tail becomes the next tile's motion context.
 Ref2VA conditionings and their image/video/audio references are supported, but
 Ref2VA references remain whole-clip guidance rather than hard endpoints.
 
-The input tile follows H3's `17k+5` frame grid. With the recommended 22-frame
-context, the first tile contributes its full length and every later tile adds
-`tile_frames - 22`. For example, a 243-frame tile samples about 10.1 seconds;
-each continuation contributes 221 new frames, about 9.2 seconds. The output
-`frame_count` reports the exact assembled length.
+Every tile follows H3's `17k+5` frame grid. With the recommended 22-frame
+context, the first tile contributes its full length and each later tile adds
+that tile's length minus 22. The output `frame_count` reports the exact
+assembled length.
 
 The looping node currently supports batch size 1. It returns the last sampled
 joint AV latent as `last_tile_latent`, so another run can continue from the
@@ -35,16 +37,25 @@ actual model output without a decode/re-encode round trip.
 
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
 after installing this pack and restart ComfyUI if necessary. It demonstrates
-three 124-frame tiles with the recommended 22-frame context. The H3 example
+three variable-length tiles (124, 141, and 158 frames) with the recommended
+22-frame context. The H3 example
 uses one global text node, three tile text nodes, and three
 `StringConcatenate` nodes. Each concatenated prompt feeds its own stock H3
 Image-to-Video conditioning node, so every tile has independent `first_frame`
-and `last_frame` image sockets. Only tile 1's latent is used to define the
-tile shape; the looping sampler owns the sampled tile latents.
+and `last_frame` image sockets. The first reference also feeds
+**MiniMax H3 Resolution From Image**, whose selected megapixel target supplies
+the same width and height to all three H3 nodes. Each H3 latent is connected
+to its matching zero-based `tile_latent_N` socket.
 
 The example assumes the standard H3 filenames used by the official workflow:
 the FL2VA diffusion model, Qwen3-VL text encoder, and separate video/audio
 VAEs. Change those loader widgets if your files use different names.
+
+Connect the first reference image to both the resolution node and tile 1's
+`first_frame`. Connect any later tile references to that tile's own image
+sockets. The resolution node preserves the first image's aspect ratio while
+rounding all three H3 canvases to the selected megapixel target and 32-pixel
+grid.
 
 Generate clip A. Feed its last frames and audio into this node. Generate
 clip B. B picks up where A left off: same motion, same speed, same
@@ -74,8 +85,9 @@ conditioning list directly, but it cannot carry per-tile image tokens.
 
 If the prompt list is shorter than the requested tile count, the provider's
 final item is repeated. For hard FL2VA endpoints or Ref2VA references, always
-connect stock H3 conditioning nodes to the sampler's `tile_conditioning_N`
-sockets; those explicit conditionings override the provider for their tile.
+connect stock H3 conditioning nodes to the sampler's zero-based
+`tile_conditioning_N` sockets; those explicit conditionings override the
+provider for their tile.
 
 ## Why this exists
 

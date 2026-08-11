@@ -26,13 +26,21 @@ def main():
     spec.loader.exec_module(package)
     looping = sys.modules["h3mc_loop_test.looping_sampler"]
 
-    frame_count = 124
-    video_t = 37
-    audio_t = 207
-    latent = {"samples": comfy.nested_tensor.NestedTensor([
-        torch.zeros((1, 24, video_t, 2, 2)),
-        torch.zeros((1, 32, 2, audio_t)),
-    ])}
+    def make_latent(video_t, audio_t):
+        return {"samples": comfy.nested_tensor.NestedTensor([
+            torch.zeros((1, 24, video_t, 2, 2)),
+            torch.zeros((1, 32, 2, audio_t)),
+        ])}
+
+    latent = make_latent(37, 207)
+    tile_latents = {
+        "tile_latent_0": latent,
+        "tile_latent_1": make_latent(42, 235),
+        "tile_latent_2": make_latent(47, 263),
+    }
+    assert looping._autogrow_values(
+        {"tile_conditioning_0": "first", "tile_conditioning_2": "third"},
+        "tile_conditioning_") == {0: "first", 2: "third"}
 
     calls = []
 
@@ -65,6 +73,7 @@ def main():
     class VideoVAE:
         def decode(self, video):
             value = float(video[0, 0, 0, 0, 0])
+            frame_count = looping._pixel_frames(video.shape[2])
             return torch.full((1, frame_count, 32, 32, 3), value)
 
     class AudioVAE:
@@ -72,6 +81,7 @@ def main():
 
         def decode(self, audio):
             value = float(audio[0, 0, 0, 0])
+            frame_count = {207: 124, 235: 141, 263: 158}[audio.shape[-1]]
             samples = round(frame_count / 24 * self.audio_sample_rate_output) + 8
             return torch.full((1, samples, 2), value)
 
@@ -80,14 +90,14 @@ def main():
         vae=VideoVAE(), audio_vae=AudioVAE(), sampler=object(),
         sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
         context_frames="22", seed=100,
-        prompt_conditionings=prompt_result.args[0])
+        prompt_conditionings=prompt_result.args[0], tile_latents=tile_latents)
     images, audio, last_latent, delivered_frames = result.args
 
     assert [seed for seed, _ in calls] == [100, 101, 102]
-    assert delivered_frames == 124 + 2 * (124 - 22) == 328
-    assert images.shape == (328, 32, 32, 3)
+    assert delivered_frames == 124 + (141 - 22) + (158 - 22) == 379
+    assert images.shape == (379, 32, 32, 3)
     assert audio["sample_rate"] == 32000
-    assert audio["waveform"].shape[-1] == round(328 / 24 * 32000)
+    assert audio["waveform"].shape[-1] == round(379 / 24 * 32000)
     assert last_latent["samples"].unbind()[0].device.type == "cpu"
 
     first_values = calls[0][1][0][1]

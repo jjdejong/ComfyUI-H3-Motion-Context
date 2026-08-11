@@ -1,8 +1,8 @@
 {
   "id": "f7c0d85d-5f87-4a31-ae74-4f905fd59b3c",
   "revision": 0,
-  "last_node_id": 19,
-  "last_link_id": 29,
+  "last_node_id": 20,
+  "last_link_id": 41,
   "nodes": [
     {
       "id": 1,
@@ -55,6 +55,27 @@
       "outputs": [{"name": "MODEL", "type": "MODEL", "links": [9, 10]}],
       "properties": {"Node name for S&R": "UNETLoader"},
       "widgets_values": ["minimax_h3_fl2va_int8_convrot.safetensors", "default"]
+    },
+    {
+      "id": 20,
+      "type": "MiniMaxH3ResolutionFromImage",
+      "pos": [-700, 860],
+      "size": [380, 170],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "IMAGE", "link": null},
+        {"name": "megapixels", "type": "FLOAT", "widget": {"name": "megapixels"}, "link": null},
+        {"name": "multiple", "type": "INT", "widget": {"name": "multiple"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "width", "type": "INT", "links": [36, 38, 40]},
+        {"name": "height", "type": "INT", "links": [37, 39, 41]}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3ResolutionFromImage"},
+      "widgets_values": [0.5, 32],
+      "title": "Connect tile 1 first reference here"
     },
     {
       "id": 5,
@@ -182,19 +203,19 @@
         {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 17},
-        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
-        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 36},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 37},
         {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
       ],
       "outputs": [
-        {"name": "positive", "type": "CONDITIONING", "links": [22, 24]},
-        {"name": "LATENT", "type": "LATENT", "links": [23]}
+        {"name": "positive", "type": "CONDITIONING", "links": [22, 33]},
+        {"name": "LATENT", "type": "LATENT", "links": [23, 30]}
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
         "A cinematic realistic video at dawn on a quiet coastal road beside the sea. A silver station wagon travels slowly along wet asphalt. Natural ocean surf, distant gulls, and a restrained ambient score. Keep the vehicle, road, weather, lighting, camera height, and color palette consistent.\n\nWide establishing view of the coastal road, with sea mist drifting across the asphalt as the camera tracks forward.",
-        768,
-        432,
+        960,
+        544,
         124
       ],
       "title": "Tile 1 — connect optional first/last image"
@@ -213,20 +234,20 @@
         {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 18},
-        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
-        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 38},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 39},
         {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
       ],
       "outputs": [
-        {"name": "positive", "type": "CONDITIONING", "links": [25]},
-        {"name": "LATENT", "type": "LATENT", "links": []}
+        {"name": "positive", "type": "CONDITIONING", "links": [34]},
+        {"name": "LATENT", "type": "LATENT", "links": [31]}
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
         "A cinematic realistic video at dawn on a quiet coastal road beside the sea. A silver station wagon travels slowly along wet asphalt. Natural ocean surf, distant gulls, and a restrained ambient score. Keep the vehicle, road, weather, lighting, camera height, and color palette consistent.\n\nMedium tracking view as the station wagon passes a weathered guardrail and low sunlight warms the wet pavement.",
-        768,
-        432,
-        124
+        960,
+        544,
+        141
       ],
       "title": "Tile 2 — connect optional first/last image"
     },
@@ -244,20 +265,20 @@
         {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 19},
-        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
-        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 40},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 41},
         {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
       ],
       "outputs": [
-        {"name": "positive", "type": "CONDITIONING", "links": [26]},
-        {"name": "LATENT", "type": "LATENT", "links": []}
+        {"name": "positive", "type": "CONDITIONING", "links": [35]},
+        {"name": "LATENT", "type": "LATENT", "links": [32]}
       ],
       "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
       "widgets_values": [
         "A cinematic realistic video at dawn on a quiet coastal road beside the sea. A silver station wagon travels slowly along wet asphalt. Natural ocean surf, distant gulls, and a restrained ambient score. Keep the vehicle, road, weather, lighting, camera height, and color palette consistent.\n\nWide finishing view as the road bends toward a bright horizon and the ocean opens beyond the guardrail.",
-        768,
-        432,
-        124
+        960,
+        544,
+        158
       ],
       "title": "Tile 3 — connect optional first/last image"
     },
@@ -307,9 +328,12 @@
         {"name": "context_frames", "type": "COMBO", "widget": {"name": "context_frames"}, "link": null},
         {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
         {"name": "prompt_conditionings", "type": "CONDITIONING", "link": null},
-        {"name": "tile_conditioning_1", "type": "CONDITIONING", "link": 24},
-        {"name": "tile_conditioning_2", "type": "CONDITIONING", "link": 25},
-        {"name": "tile_conditioning_3", "type": "CONDITIONING", "link": 26}
+        {"name": "tile_latent_0", "type": "LATENT", "link": 30},
+        {"name": "tile_latent_1", "type": "LATENT", "link": 31},
+        {"name": "tile_latent_2", "type": "LATENT", "link": 32},
+        {"name": "tile_conditioning_0", "type": "CONDITIONING", "link": 33},
+        {"name": "tile_conditioning_1", "type": "CONDITIONING", "link": 34},
+        {"name": "tile_conditioning_2", "type": "CONDITIONING", "link": 35}
       ],
       "outputs": [
         {"name": "images", "type": "IMAGE", "links": [27]},
@@ -374,12 +398,21 @@
     [21, 16, 0, 17, 5, "SIGMAS"],
     [22, 12, 0, 17, 1, "CONDITIONING"],
     [23, 12, 1, 17, 6, "LATENT"],
-    [24, 12, 0, 17, 11, "CONDITIONING"],
-    [25, 13, 0, 17, 12, "CONDITIONING"],
-    [26, 14, 0, 17, 13, "CONDITIONING"],
     [27, 17, 0, 18, 0, "IMAGE"],
     [28, 17, 1, 18, 1, "AUDIO"],
-    [29, 18, 0, 19, 0, "VIDEO"]
+    [29, 18, 0, 19, 0, "VIDEO"],
+    [30, 12, 1, 17, 11, "LATENT"],
+    [31, 13, 1, 17, 12, "LATENT"],
+    [32, 14, 1, 17, 13, "LATENT"],
+    [33, 12, 0, 17, 14, "CONDITIONING"],
+    [34, 13, 0, 17, 15, "CONDITIONING"],
+    [35, 14, 0, 17, 16, "CONDITIONING"],
+    [36, 20, 0, 12, 5, "INT"],
+    [37, 20, 1, 12, 6, "INT"],
+    [38, 20, 0, 13, 5, "INT"],
+    [39, 20, 1, 13, 6, "INT"],
+    [40, 20, 0, 14, 5, "INT"],
+    [41, 20, 1, 14, 6, "INT"]
   ],
   "groups": [],
   "config": {},
