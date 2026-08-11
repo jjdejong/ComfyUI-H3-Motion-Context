@@ -329,12 +329,12 @@
         {"name": "settling_tail_frames", "type": "INT", "widget": {"name": "settling_tail_frames"}, "link": null},
         {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
         {"name": "prompt_conditionings", "type": "CONDITIONING", "link": null},
-        {"name": "tile_latent_0", "type": "LATENT", "link": 30},
-        {"name": "tile_latent_1", "type": "LATENT", "link": 31},
-        {"name": "tile_latent_2", "type": "LATENT", "link": 32},
-        {"name": "tile_conditioning_0", "type": "CONDITIONING", "link": 33},
-        {"name": "tile_conditioning_1", "type": "CONDITIONING", "link": 34},
-        {"name": "tile_conditioning_2", "type": "CONDITIONING", "link": 35}
+        {"label": "tile_latent_0", "name": "tile_latents.tile_latent_0", "type": "LATENT", "link": 30},
+        {"label": "tile_latent_1", "name": "tile_latents.tile_latent_1", "type": "LATENT", "link": 31},
+        {"label": "tile_latent_2", "name": "tile_latents.tile_latent_2", "type": "LATENT", "link": 32},
+        {"label": "tile_conditioning_0", "name": "tile_conditionings.tile_conditioning_0", "type": "CONDITIONING", "link": 33},
+        {"label": "tile_conditioning_1", "name": "tile_conditionings.tile_conditioning_1", "type": "CONDITIONING", "link": 34},
+        {"label": "tile_conditioning_2", "name": "tile_conditionings.tile_conditioning_2", "type": "CONDITIONING", "link": 35}
       ],
       "outputs": [
         {"name": "images", "type": "IMAGE", "links": [27]},

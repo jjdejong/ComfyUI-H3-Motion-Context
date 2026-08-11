@@ -1,6 +1,7 @@
 """Run the looping orchestration end to end without invoking the DiT."""
 
 import importlib.util
+import json
 import os
 import sys
 
@@ -31,6 +32,17 @@ def main():
         "display_name"] == "Tile latents (group)"
     assert schema_info["input"]["optional"]["tile_conditionings"][1][
         "display_name"] == "Tile conditionings (group)"
+
+    with open(os.path.join(PACKAGE_DIR, "example_workflows",
+                           "minimax_h3_looping.json"), encoding="utf-8") as file:
+        workflow = json.load(file)
+    sampler_node = next(node for node in workflow["nodes"]
+                        if node["type"] == "MiniMaxH3LoopingSampler")
+    input_names = {input["name"] for input in sampler_node["inputs"]}
+    assert "tile_latents.tile_latent_0" in input_names
+    assert "tile_conditionings.tile_conditioning_0" in input_names
+    assert "tile_latent_0" not in input_names
+    assert "tile_conditioning_0" not in input_names
 
     def make_latent(video_t, audio_t):
         return {"samples": comfy.nested_tensor.NestedTensor([
