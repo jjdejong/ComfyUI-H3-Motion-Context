@@ -88,8 +88,11 @@ def main():
         "A silver station wagon at dawn.\n\nThe road bends toward the horizon.",
     ]
 
+    decode_calls = []
+
     class VideoVAE:
-        def decode(self, video):
+        def decode(self, video, vae_options=None):
+            decode_calls.append(vae_options)
             value = float(video[0, 0, 0, 0, 0])
             frame_count = looping._pixel_frames(video.shape[2])
             return torch.full((1, frame_count, 32, 32, 3), value)
@@ -108,7 +111,8 @@ def main():
         vae=VideoVAE(), audio_vae=AudioVAE(), sampler=object(),
         sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
         context_frames="22", seed=100,
-        prompt_conditionings=prompt_result.args[0], tile_latents=tile_latents)
+        prompt_conditionings=prompt_result.args[0], tile_latents=tile_latents,
+        decode_mode="advanced", decode_tile_size="512")
     images, audio, last_latent, delivered_frames = result.args
 
     assert [seed for seed, _ in calls] == [100, 101, 102]
@@ -117,6 +121,30 @@ def main():
     assert audio["sample_rate"] == 32000
     assert audio["waveform"].shape[-1] == round(379 / 24 * 32000)
     assert last_latent["samples"].unbind()[0].device.type == "cpu"
+    assert decode_calls == [{
+        "decode_options": {"tile_size": 512, "tile_overlap": 128},
+    }] * 3
+
+    class MemoryVAE:
+        upscale_ratio = (None, 16, 16)
+        vae_dtype = torch.float16
+
+        class Patcher:
+            def get_free_memory(self, device):
+                return 1_000_000_000
+
+            def model_size(self):
+                return 0
+
+        patcher = Patcher()
+        device = torch.device("cpu")
+
+        def memory_used_decode(self, shape, dtype):
+            return shape[-1] ** 2 * 100_000
+
+    auto_options = looping._resolve_decode_options(
+        MemoryVAE(), torch.zeros((1, 24, 7, 1, 1)), "auto", "512")
+    assert auto_options == {"tile_size": 1024, "tile_overlap": 256}
 
     try:
         looping.MiniMaxH3LoopingSampler.execute(

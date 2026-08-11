@@ -328,6 +328,8 @@
         {"name": "context_frames", "type": "COMBO", "widget": {"name": "context_frames"}, "link": null},
         {"name": "settling_tail_frames", "type": "INT", "widget": {"name": "settling_tail_frames"}, "link": null},
         {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
+        {"name": "decode_mode", "type": "COMBO", "widget": {"name": "decode_mode"}, "link": null},
+        {"name": "decode_tile_size", "type": "COMBO", "widget": {"name": "decode_tile_size"}, "link": null},
         {"name": "prompt_conditionings", "type": "CONDITIONING", "link": null},
         {"label": "tile_latent_0", "name": "tile_latents.tile_latent_0", "type": "LATENT", "link": 30},
         {"label": "tile_latent_1", "name": "tile_latents.tile_latent_1", "type": "LATENT", "link": 31},
@@ -343,7 +345,7 @@
         {"name": "frame_count", "type": "INT", "links": []}
       ],
       "properties": {"Node name for S&R": "MiniMaxH3LoopingSampler"},
-      "widgets_values": [3, "22", 0, 424242]
+      "widgets_values": [3, "22", 0, 424242, "auto", "512"]
     },
     {
       "id": 18,
@@ -402,12 +404,12 @@
     [27, 17, 0, 18, 0, "IMAGE"],
     [28, 17, 1, 18, 1, "AUDIO"],
     [29, 18, 0, 19, 0, "VIDEO"],
-    [30, 12, 1, 17, 11, "LATENT"],
-    [31, 13, 1, 17, 12, "LATENT"],
-    [32, 14, 1, 17, 13, "LATENT"],
-    [33, 12, 0, 17, 14, "CONDITIONING"],
-    [34, 13, 0, 17, 15, "CONDITIONING"],
-    [35, 14, 0, 17, 16, "CONDITIONING"],
+    [30, 12, 1, 17, 13, "LATENT"],
+    [31, 13, 1, 17, 14, "LATENT"],
+    [32, 14, 1, 17, 15, "LATENT"],
+    [33, 12, 0, 17, 16, "CONDITIONING"],
+    [34, 13, 0, 17, 17, "CONDITIONING"],
+    [35, 14, 0, 17, 18, "CONDITIONING"],
     [36, 20, 0, 12, 5, "INT"],
     [37, 20, 1, 12, 6, "INT"],
     [38, 20, 0, 13, 5, "INT"],

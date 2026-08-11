@@ -26,6 +26,10 @@ from .nodes import (
 
 _LOG = logging.getLogger("h3_motion_context")
 
+DECODE_TILE_SIZES = (256, 384, 512, 768, 1024, 1536, 2048)
+DECODE_TILE_OVERLAP_MIN = 64
+DECODE_MEMORY_MARGIN = 1.35
+
 
 def _autogrow_values(values, prefix):
     return {
@@ -167,13 +171,56 @@ def _sample_tile(model, conditioning, sampler, sigmas, latent, seed):
     return sampled_latent
 
 
-def _decode_video(vae, latent):
+def _decode_video(vae, latent, decode_options=None):
     video = _streams_from_latent(latent)[0]
-    images = vae.decode(video)
+    if decode_options is None:
+        images = vae.decode(video)
+    else:
+        images = vae.decode(video, vae_options={
+            "decode_options": decode_options,
+        })
     if images.ndim == 5:
         images = images.reshape(
             -1, images.shape[-3], images.shape[-2], images.shape[-1])
     return images
+
+
+def _decode_memory_requirement(vae, video, tile_size):
+    spatial_scale = int(vae.upscale_ratio[1])
+    latent_tile_size = max(1, tile_size // spatial_scale)
+    shape = (video.shape[0], video.shape[1], video.shape[2],
+             latent_tile_size, latent_tile_size)
+    return (vae.patcher.model_size()
+            + vae.memory_used_decode(shape, vae.vae_dtype))
+
+
+def _resolve_decode_options(vae, video, decode_mode, decode_tile_size):
+    if str(decode_mode or "auto") == "advanced":
+        tile_size = int(decode_tile_size)
+        if tile_size not in DECODE_TILE_SIZES:
+            raise ValueError(
+                "h3_motion_context: decode_tile_size must be one of %s"
+                % ", ".join(str(value) for value in DECODE_TILE_SIZES))
+    else:
+        tile_size = DECODE_TILE_SIZES[0]
+        try:
+            free_memory = vae.patcher.get_free_memory(vae.device)
+            for candidate in reversed(DECODE_TILE_SIZES):
+                required = _decode_memory_requirement(vae, video, candidate)
+                if required * DECODE_MEMORY_MARGIN <= free_memory:
+                    tile_size = candidate
+                    break
+        except (AttributeError, TypeError, ValueError):
+            _LOG.warning(
+                "h3_motion_context: could not estimate H3 VAE decode "
+                "memory; using 256 pixel tiles")
+
+    tile_overlap = max(DECODE_TILE_OVERLAP_MIN, tile_size // 4)
+    _LOG.info(
+        "h3_motion_context: VAE decode uses %d pixel spatial tiles with "
+        "%d pixel overlap and native H3 temporal chunks",
+        tile_size, tile_overlap)
+    return {"tile_size": tile_size, "tile_overlap": tile_overlap}
 
 
 def _decode_audio(audio_vae, latent):
@@ -293,6 +340,21 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                 io.Int.Input("seed", default=0, min=0,
                              max=0xffffffffffffffff,
                              control_after_generate=True),
+                io.Combo.Input(
+                    "decode_mode", options=["auto", "advanced"],
+                    default="auto",
+                    tooltip=(
+                        "Auto selects the largest safe H3 spatial tile "
+                        "immediately before decoding. Advanced uses the "
+                        "selected tile size.")),
+                io.Combo.Input(
+                    "decode_tile_size",
+                    options=[str(value) for value in DECODE_TILE_SIZES],
+                    default="512",
+                    tooltip=(
+                        "Advanced H3 VAE spatial tile size in output pixels. "
+                        "Temporal decoding remains on H3's native 17-frame "
+                        "chunking.")),
                 io.Conditioning.Input(
                     "prompt_conditionings",
                     optional=True,
@@ -333,7 +395,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
     def execute(cls, model, positive, vae, audio_vae, sampler, sigmas,
                 latent, tiles, context_frames, seed,
                 prompt_conditionings=None, tile_conditionings=None,
-                tile_latents=None, settling_tail_frames=0):
+                tile_latents=None, settling_tail_frames=0,
+                decode_mode="auto", decode_tile_size="512"):
         tiles = int(tiles)
         context_frames = int(context_frames)
         settling_tail_frames = int(settling_tail_frames)
@@ -444,13 +507,16 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                     audio_steps)
             sampled_tiles.append((sampled, head_trim, tail_trim, frame_count))
 
+        first_video = _streams_from_latent(sampled_tiles[0][0])[0]
+        decode_options = _resolve_decode_options(
+            vae, first_video, decode_mode, decode_tile_size)
         image_chunks = []
         audio_chunks = []
         sample_rate = None
         delivered_start = 0
         for tile_index, (sampled, head_trim, tail_trim, frame_count) in enumerate(sampled_tiles):
             comfy.model_management.throw_exception_if_processing_interrupted()
-            images = _decode_video(vae, sampled)
+            images = _decode_video(vae, sampled, decode_options)
             waveform, tile_sample_rate = _decode_audio(audio_vae, sampled)
             if sample_rate is None:
                 sample_rate = tile_sample_rate
