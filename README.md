@@ -35,11 +35,12 @@ actual model output without a decode/re-encode round trip.
 
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
 after installing this pack and restart ComfyUI if necessary. It demonstrates
-three 124-frame tiles with the recommended 22-frame context. The H3
-Multi-Prompt Provider encodes three independent tile prompts and prepends its
-global prompt to each one. The stock H3 conditioning node supplies the tile
-shape and a fallback conditioning; its latent output is used only to define
-the tile latent because the looping sampler owns the sampled tile shape.
+three 124-frame tiles with the recommended 22-frame context. The H3 example
+uses one global text node, three tile text nodes, and three
+`StringConcatenate` nodes. Each concatenated prompt feeds its own stock H3
+Image-to-Video conditioning node, so every tile has independent `first_frame`
+and `last_frame` image sockets. Only tile 1's latent is used to define the
+tile shape; the looping sampler owns the sampled tile latents.
 
 The example assumes the standard H3 filenames used by the official workflow:
 the FL2VA diffusion model, Qwen3-VL text encoder, and separate video/audio
@@ -57,20 +58,24 @@ why. A loud failure beats a bad render you don't notice.
 
 ### Global and tile prompts
 
-Use **MiniMax H3 Multi-Prompt Provider** for ordinary text scheduling. Put
-facts that must hold throughout the whole clip in `global_prompt`. Put one
-standalone description per tile in `tile_prompts`, separated by `|`. The node
-concatenates the global prompt with every tile prompt before encoding it, so
-each tile is understandable on its own. Do not write later prompts as
-"continue the previous tile" or "the same"; the model receives no previous
-tile text.
+For image-conditioned tiles, use the pattern in the example: keep the common
+facts in one `PrimitiveStringMultiline` node, keep each standalone tile
+description in its own text node, and join each pair with
+`StringConcatenate`. Each resulting string is encoded by that tile's stock H3
+Image-to-Video node. There is one active global prompt, not a second hidden
+global prompt in the latent-shape node.
 
-The provider returns a prompt list, and the looping sampler uses item N for
-tile N. If the list is shorter than the requested tile count, its final item
-is repeated. For image-token prompts, hard FL2VA endpoints, or Ref2VA
-references, connect stock H3 conditioning nodes to the sampler's
-`tile_conditioning_N` sockets instead; those explicit conditionings override
-the provider for their tile.
+Do not write later prompts as "continue the previous tile" or "the same"; the
+model receives no previous tile text.
+
+**MiniMax H3 Multi-Prompt Provider** remains available for text-only tiles. It
+prepends one global prompt to a `|`-separated prompt list and returns the
+conditioning list directly, but it cannot carry per-tile image tokens.
+
+If the prompt list is shorter than the requested tile count, the provider's
+final item is repeated. For hard FL2VA endpoints or Ref2VA references, always
+connect stock H3 conditioning nodes to the sampler's `tile_conditioning_N`
+sockets; those explicit conditionings override the provider for their tile.
 
 ## Why this exists
 
