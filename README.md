@@ -31,6 +31,19 @@ The looping node currently supports batch size 1. It returns the last sampled
 joint AV latent as `last_tile_latent`, so another run can continue from the
 actual model output without a decode/re-encode round trip.
 
+## Example workflow
+
+Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
+after installing this pack and restart ComfyUI if necessary. It demonstrates
+three 124-frame tiles with the recommended 22-frame context. The three stock
+H3 conditioning nodes provide different prompts to the three tiles; their
+latent outputs are intentionally not used except for the first tile, because
+the looping sampler owns the tile latent shape.
+
+The example assumes the standard H3 filenames used by the official workflow:
+the FL2VA diffusion model, Qwen3-VL text encoder, and separate video/audio
+VAEs. Change those loader widgets if your files use different names.
+
 Generate clip A. Feed its last frames and audio into this node. Generate
 clip B. B picks up where A left off: same motion, same speed, same
 direction, and the same audio continued rather than a new take that

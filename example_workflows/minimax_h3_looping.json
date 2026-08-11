@@ -1,0 +1,262 @@
+{
+  "id": "f7c0d85d-5f87-4a31-ae74-4f905fd59b3c",
+  "revision": 0,
+  "last_node_id": 12,
+  "last_link_id": 19,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "VAELoader",
+      "pos": [-1180, 120],
+      "size": [640, 70],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [1, 2, 3]}],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["minimax_h3_video_vae_fp16.safetensors"]
+    },
+    {
+      "id": 2,
+      "type": "VAELoader",
+      "pos": [-1180, 240],
+      "size": [640, 70],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [4]}],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["minimax_h3_audio_vae_fp32.safetensors"]
+    },
+    {
+      "id": 3,
+      "type": "CLIPLoader",
+      "pos": [-1180, 360],
+      "size": [640, 120],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "CLIP", "type": "CLIP", "links": [5, 6, 7]}],
+      "properties": {"Node name for S&R": "CLIPLoader"},
+      "widgets_values": ["qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "minimax", "default"]
+    },
+    {
+      "id": 4,
+      "type": "UNETLoader",
+      "pos": [-1180, 540],
+      "size": [640, 90],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [8, 9]}],
+      "properties": {"Node name for S&R": "UNETLoader"},
+      "widgets_values": ["minimax_h3_fl2va_int8_convrot.safetensors", "default"]
+    },
+    {
+      "id": 5,
+      "type": "MiniMaxH3ImageToVideo",
+      "pos": [-360, 20],
+      "size": [420, 430],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 5},
+        {"name": "vae", "type": "VAE", "link": 1},
+        {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "positive", "type": "CONDITIONING", "links": [12, 16]},
+        {"name": "LATENT", "type": "LATENT", "links": [13]}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
+      "widgets_values": [
+        "A cinematic wide shot of a quiet coastal road at dawn. The camera moves slowly forward as sea mist drifts across the asphalt. Natural ocean surf, distant gulls, and a restrained atmospheric score continue throughout.",
+        768,
+        432,
+        124
+      ],
+      "title": "Tile 1 — coastal road"
+    },
+    {
+      "id": 6,
+      "type": "MiniMaxH3ImageToVideo",
+      "pos": [-360, 500],
+      "size": [420, 430],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 6},
+        {"name": "vae", "type": "VAE", "link": 2},
+        {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "positive", "type": "CONDITIONING", "links": [14]},
+        {"name": "LATENT", "type": "LATENT", "links": []}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
+      "widgets_values": [
+        "The same coastal road and forward camera movement continue smoothly. The mist thins as the sun rises, wet pavement catches warm light, and the ocean surf and distant gulls remain continuous with the previous tile.",
+        768,
+        432,
+        124
+      ],
+      "title": "Tile 2 — mist lifting"
+    },
+    {
+      "id": 7,
+      "type": "MiniMaxH3ImageToVideo",
+      "pos": [-360, 980],
+      "size": [420, 430],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 7},
+        {"name": "vae", "type": "VAE", "link": 3},
+        {"name": "first_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "last_frame", "shape": 7, "type": "IMAGE", "link": null},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": null},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": null},
+        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "positive", "type": "CONDITIONING", "links": [15]},
+        {"name": "LATENT", "type": "LATENT", "links": []}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
+      "widgets_values": [
+        "The camera completes the same gentle coastal tracking shot as the road curves toward the bright horizon. The sea grows more visible beyond the guardrail; surf, gulls, and the quiet score resolve naturally without a cut.",
+        768,
+        432,
+        124
+      ],
+      "title": "Tile 3 — bright horizon"
+    },
+    {
+      "id": 8,
+      "type": "KSamplerSelect",
+      "pos": [420, 120],
+      "size": [260, 60],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [{"name": "sampler_name", "type": "COMBO", "widget": {"name": "sampler_name"}, "link": null}],
+      "outputs": [{"name": "SAMPLER", "type": "SAMPLER", "links": [10]}],
+      "properties": {"Node name for S&R": "KSamplerSelect"},
+      "widgets_values": ["euler"]
+    },
+    {
+      "id": 9,
+      "type": "BasicScheduler",
+      "pos": [420, 220],
+      "size": [370, 130],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [{"name": "model", "type": "MODEL", "link": 9}],
+      "outputs": [{"name": "SIGMAS", "type": "SIGMAS", "links": [11]}],
+      "properties": {"Node name for S&R": "BasicScheduler"},
+      "widgets_values": ["simple", 20, 1]
+    },
+    {
+      "id": 10,
+      "type": "MiniMaxH3LoopingSampler",
+      "pos": [860, 120],
+      "size": [440, 430],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 8},
+        {"name": "positive", "type": "CONDITIONING", "link": 12},
+        {"name": "vae", "type": "VAE", "link": 1},
+        {"name": "audio_vae", "type": "VAE", "link": 4},
+        {"name": "sampler", "type": "SAMPLER", "link": 10},
+        {"name": "sigmas", "type": "SIGMAS", "link": 11},
+        {"name": "latent", "type": "LATENT", "link": 13},
+        {"name": "tiles", "type": "INT", "widget": {"name": "tiles"}, "link": null},
+        {"name": "context_frames", "type": "COMBO", "widget": {"name": "context_frames"}, "link": null},
+        {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
+        {"name": "tile_conditioning_1", "type": "CONDITIONING", "link": 16},
+        {"name": "tile_conditioning_2", "type": "CONDITIONING", "link": 14},
+        {"name": "tile_conditioning_3", "type": "CONDITIONING", "link": 15}
+      ],
+      "outputs": [
+        {"name": "images", "type": "IMAGE", "links": [17]},
+        {"name": "audio", "type": "AUDIO", "links": [18]},
+        {"name": "last_tile_latent", "type": "LATENT", "links": []},
+        {"name": "frame_count", "type": "INT", "links": []}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3LoopingSampler"},
+      "widgets_values": [3, "22", 424242]
+    },
+    {
+      "id": 11,
+      "type": "CreateVideo",
+      "pos": [1400, 220],
+      "size": [280, 110],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {"name": "images", "type": "IMAGE", "link": 17},
+        {"name": "audio", "shape": 7, "type": "AUDIO", "link": 18}
+      ],
+      "outputs": [{"name": "VIDEO", "type": "VIDEO", "links": [19]}],
+      "properties": {"Node name for S&R": "CreateVideo"},
+      "widgets_values": [24, 8]
+    },
+    {
+      "id": 12,
+      "type": "SaveVideo",
+      "pos": [1760, 220],
+      "size": [420, 180],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [{"name": "video", "type": "VIDEO", "link": 19}],
+      "outputs": [{"name": "video", "type": "VIDEO", "links": null}],
+      "properties": {},
+      "widgets_values": ["video/MiniMax_H3_loop", "auto", "auto"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 5, 1, "VAE"],
+    [2, 1, 0, 6, 1, "VAE"],
+    [3, 1, 0, 7, 1, "VAE"],
+    [4, 2, 0, 10, 3, "VAE"],
+    [5, 3, 0, 5, 0, "CLIP"],
+    [6, 3, 0, 6, 0, "CLIP"],
+    [7, 3, 0, 7, 0, "CLIP"],
+    [8, 4, 0, 10, 0, "MODEL"],
+    [9, 4, 0, 9, 0, "MODEL"],
+    [10, 8, 0, 10, 4, "SAMPLER"],
+    [11, 9, 0, 10, 5, "SIGMAS"],
+    [12, 5, 0, 10, 1, "CONDITIONING"],
+    [13, 5, 1, 10, 6, "LATENT"],
+    [14, 6, 0, 10, 11, "CONDITIONING"],
+    [15, 7, 0, 10, 12, "CONDITIONING"],
+    [16, 5, 0, 10, 10, "CONDITIONING"],
+    [17, 10, 0, 11, 0, "IMAGE"],
+    [18, 10, 1, 11, 1, "AUDIO"],
+    [19, 11, 0, 12, 0, "VIDEO"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {"ds": {"scale": 0.75, "offset": [0, 0]}},
+  "version": 0.4
+}
