@@ -160,6 +160,48 @@ def _trim_decoded(images, waveform, sample_rate, trim_frames, frame_count,
     return images.cpu(), waveform[..., start:start + want].cpu()
 
 
+class MiniMaxH3MultiPromptProvider(io.ComfyNode):
+    """Encode a shared prompt plus one standalone prompt per tile."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3MultiPromptProvider",
+            display_name="MiniMax H3 Multi-Prompt Provider",
+            category="conditioning/minimax",
+            description=(
+                "Encode one standalone H3 prompt per tile, prepending the "
+                "same global prompt to every tile."),
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input(
+                    "global_prompt", multiline=True, dynamic_prompts=True,
+                    optional=True, default="",
+                    tooltip="Text shared by every tile."),
+                io.String.Input(
+                    "tile_prompts", multiline=True, dynamic_prompts=True,
+                    default="",
+                    tooltip="One standalone prompt per tile, separated by |."),
+            ],
+            outputs=[io.Conditioning.Output(display_name="conditionings")],
+        )
+
+    @classmethod
+    def execute(cls, clip, global_prompt, tile_prompts):
+        global_prompt = global_prompt.strip()
+        prompts = [prompt.strip() for prompt in tile_prompts.split("|")]
+        if not prompts or all(not prompt for prompt in prompts):
+            prompts = [""]
+
+        encoded = []
+        for prompt in prompts:
+            full_prompt = "\n\n".join(
+                part for part in (global_prompt, prompt) if part)
+            encoded.append(clip.encode_from_tokens_scheduled(
+                clip.tokenize(full_prompt)))
+        return io.NodeOutput(encoded)
+
+
 class MiniMaxH3LoopingSampler(io.ComfyNode):
     """Sample H3 windows sequentially and carry their joint AV latent tail."""
 
@@ -197,6 +239,13 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                 io.Int.Input("seed", default=0, min=0,
                              max=0xffffffffffffffff,
                              control_after_generate=True),
+                io.Conditioning.Input(
+                    "prompt_conditionings",
+                    optional=True,
+                    tooltip=(
+                        "Prompt list from MiniMax H3 Multi-Prompt Provider. "
+                        "The final item repeats if fewer prompts than tiles "
+                        "are supplied.")),
                 io.Autogrow.Input(
                     "tile_conditionings", template=conditioning_template,
                     optional=True,
@@ -214,7 +263,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, positive, vae, audio_vae, sampler, sigmas,
-                latent, tiles, context_frames, seed, tile_conditionings=None):
+                latent, tiles, context_frames, seed,
+                prompt_conditionings=None, tile_conditionings=None):
         tiles = int(tiles)
         context_frames = int(context_frames)
         parts = _streams_from_latent(latent)
@@ -232,6 +282,7 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
 
         overrides = _autogrow_values(
             tile_conditionings, "tile_conditioning_")
+        prompt_conditionings = prompt_conditionings or []
         if len(overrides) > tiles:
             raise ValueError(
                 "h3_motion_context: %d tile conditionings supplied for %d tiles"
@@ -241,8 +292,16 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
         previous = None
         for tile_index in range(tiles):
             comfy.model_management.throw_exception_if_processing_interrupted()
-            tile_specific = tile_index < len(overrides)
-            source = overrides[tile_index] if tile_specific else positive
+            if tile_index < len(overrides):
+                source = overrides[tile_index]
+                tile_specific = True
+            elif prompt_conditionings:
+                source = prompt_conditionings[min(
+                    tile_index, len(prompt_conditionings) - 1)]
+                tile_specific = True
+            else:
+                source = positive
+                tile_specific = False
             conditioning = _conditioning_for_tile(
                 source, tile_index, tiles, frame_count, tile_specific)
             target = _copy_latent(latent)

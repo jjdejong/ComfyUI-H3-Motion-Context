@@ -46,6 +46,22 @@ def main():
 
     looping._sample_tile = fake_sample
 
+    class Clip:
+        def tokenize(self, prompt):
+            return prompt
+
+        def encode_from_tokens_scheduled(self, tokens):
+            return [[torch.zeros((1, 1)), {"prompt": tokens}]]
+
+    prompt_result = looping.MiniMaxH3MultiPromptProvider.execute(
+        clip=Clip(), global_prompt="A silver station wagon at dawn.",
+        tile_prompts="Wide road shot.|The wagon passes a guardrail.|The road bends toward the horizon.")
+    assert [entry[0][1]["prompt"] for entry in prompt_result.args[0]] == [
+        "A silver station wagon at dawn.\n\nWide road shot.",
+        "A silver station wagon at dawn.\n\nThe wagon passes a guardrail.",
+        "A silver station wagon at dawn.\n\nThe road bends toward the horizon.",
+    ]
+
     class VideoVAE:
         def decode(self, video):
             value = float(video[0, 0, 0, 0, 0])
@@ -63,7 +79,8 @@ def main():
         model=object(), positive=[[torch.zeros((1, 1)), {}]],
         vae=VideoVAE(), audio_vae=AudioVAE(), sampler=object(),
         sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
-        context_frames="22", seed=100)
+        context_frames="22", seed=100,
+        prompt_conditionings=prompt_result.args[0])
     images, audio, last_latent, delivered_frames = result.args
 
     assert [seed for seed, _ in calls] == [100, 101, 102]
@@ -75,6 +92,8 @@ def main():
 
     first_values = calls[0][1][0][1]
     second_values = calls[1][1][0][1]
+    assert first_values["prompt"].endswith("Wide road shot.")
+    assert second_values["prompt"].endswith("The wagon passes a guardrail.")
     assert "minimax_keyframes" not in first_values
     assert len(second_values["minimax_keyframes"]) == 7
     assert len(second_values["minimax_refs"]) == 1

@@ -35,10 +35,11 @@ actual model output without a decode/re-encode round trip.
 
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
 after installing this pack and restart ComfyUI if necessary. It demonstrates
-three 124-frame tiles with the recommended 22-frame context. The three stock
-H3 conditioning nodes provide different prompts to the three tiles; their
-latent outputs are intentionally not used except for the first tile, because
-the looping sampler owns the tile latent shape.
+three 124-frame tiles with the recommended 22-frame context. The H3
+Multi-Prompt Provider encodes three independent tile prompts and prepends its
+global prompt to each one. The stock H3 conditioning node supplies the tile
+shape and a fallback conditioning; its latent output is used only to define
+the tile latent because the looping sampler owns the sampled tile shape.
 
 The example assumes the standard H3 filenames used by the official workflow:
 the FL2VA diffusion model, Qwen3-VL text encoder, and separate video/audio
@@ -53,6 +54,23 @@ Nothing on disk is edited. The nodes patch ComfyUI at runtime, and the
 patches check their own math against the live ComfyUI code every time you
 start. If an update breaks an assumption, the nodes refuse to run and say
 why. A loud failure beats a bad render you don't notice.
+
+### Global and tile prompts
+
+Use **MiniMax H3 Multi-Prompt Provider** for ordinary text scheduling. Put
+facts that must hold throughout the whole clip in `global_prompt`. Put one
+standalone description per tile in `tile_prompts`, separated by `|`. The node
+concatenates the global prompt with every tile prompt before encoding it, so
+each tile is understandable on its own. Do not write later prompts as
+"continue the previous tile" or "the same"; the model receives no previous
+tile text.
+
+The provider returns a prompt list, and the looping sampler uses item N for
+tile N. If the list is shorter than the requested tile count, its final item
+is repeated. For image-token prompts, hard FL2VA endpoints, or Ref2VA
+references, connect stock H3 conditioning nodes to the sampler's
+`tile_conditioning_N` sockets instead; those explicit conditionings override
+the provider for their tile.
 
 ## Why this exists
 

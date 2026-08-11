@@ -31,15 +31,20 @@ from .nodes import (
     NODE_CLASS_MAPPINGS as _CONTEXT_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _CONTEXT_NODE_DISPLAY_NAME_MAPPINGS,
 )
-from .looping_sampler import MiniMaxH3LoopingSampler
+from .looping_sampler import (
+    MiniMaxH3LoopingSampler,
+    MiniMaxH3MultiPromptProvider,
+)
 
 NODE_CLASS_MAPPINGS = {
     **_CONTEXT_NODE_CLASS_MAPPINGS,
     "MiniMaxH3LoopingSampler": MiniMaxH3LoopingSampler,
+    "MiniMaxH3MultiPromptProvider": MiniMaxH3MultiPromptProvider,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **_CONTEXT_NODE_DISPLAY_NAME_MAPPINGS,
     "MiniMaxH3LoopingSampler": "MiniMax H3 Looping Sampler",
+    "MiniMaxH3MultiPromptProvider": "MiniMax H3 Multi-Prompt Provider",
 }
 
 logging.getLogger("h3_motion_context").info(
