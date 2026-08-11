@@ -86,6 +86,32 @@ def main():
     sys.modules["comfy.model_base"] = mb
     sys.modules["comfy"].model_base = mb
 
+    for name in ("comfy.model_management", "comfy.nested_tensor", "comfy.sample"):
+        module = types.ModuleType(name)
+        sys.modules[name] = module
+        setattr(sys.modules["comfy"], name.rsplit(".", 1)[-1], module)
+
+    lp = types.ModuleType("latent_preview")
+    sys.modules["latent_preview"] = lp
+
+    comfy_api = types.ModuleType("comfy_api")
+    comfy_api_latest = types.ModuleType("comfy_api.latest")
+    class ComfyNode:
+        pass
+    comfy_api_latest.io = types.SimpleNamespace(ComfyNode=ComfyNode)
+    comfy_api.latest = comfy_api_latest
+    sys.modules["comfy_api"] = comfy_api
+    sys.modules["comfy_api.latest"] = comfy_api_latest
+
+    comfy_extras = types.ModuleType("comfy_extras")
+    custom_sampler = types.ModuleType("comfy_extras.nodes_custom_sampler")
+    class Guider_Basic:
+        pass
+    custom_sampler.Guider_Basic = Guider_Basic
+    comfy_extras.nodes_custom_sampler = custom_sampler
+    sys.modules["comfy_extras"] = comfy_extras
+    sys.modules["comfy_extras.nodes_custom_sampler"] = custom_sampler
+
     captured = {}
     nh = types.ModuleType("node_helpers")
 
@@ -238,14 +264,65 @@ def main():
           "(bit-identical to the source steps), audio 37 steps, end_frame "
           "%.4f (overhang-compensated)" % (idx, got_end))
 
+    # A looping tile may still have a hard FL2VA endpoint. Motion Context
+    # replaces only its head anchors and must retain, mark and sort the end.
+    captured.clear()
+    endpoint = T(np.ones((1, 16, 1, h, w), dtype=np.float32))
+    node.apply(
+        conditioning=[["c", {"minimax_keyframes": [{
+            "resolved_frame_index": frames - 1, "latent": endpoint,
+        }], "minimax_frame_count": frames}]],
+        vae=VAE(), latent=target, context_length="22",
+        audio_context_length=22, context_latent=prev)
+    merged = captured["minimax_keyframes"]
+    assert len(merged) == 8, len(merged)
+    assert [kf[nodes.MC_KEY] for kf in merged[-2:]] == [18, frames - 1]
+    assert merged[-1]["resolved_frame_index"] == 0
+    print("endpoint merge: motion head retained the stock FL2VA last anchor")
+
+    looping = sys.modules["h3mc_pkg.looping_sampler"]
+    first = {"resolved_frame_index": 0, "latent": "first"}
+    last = {"resolved_frame_index": frames - 1, "latent": "last"}
+    base = [["c", {"minimax_keyframes": [first, last],
+                    "minimax_frame_count": frames}]]
+    tile0 = looping._conditioning_for_tile(base, 0, 3, frames, False)
+    tile1 = looping._conditioning_for_tile(base, 1, 3, frames, False)
+    tile2 = looping._conditioning_for_tile(base, 2, 3, frames, False)
+    assert [kf[nodes.MC_KEY] for kf in tile0[0][1]["minimax_keyframes"]] == [0]
+    assert "minimax_keyframes" not in tile1[0][1]
+    assert [kf[nodes.MC_KEY] for kf in tile2[0][1]["minimax_keyframes"]] == [frames - 1]
+    local = looping._conditioning_for_tile(base, 1, 3, frames, True)
+    assert [kf[nodes.MC_KEY] for kf in local[0][1]["minimax_keyframes"]] == [frames - 1]
+    print("loop endpoints: global first/final and tile-local final assigned correctly")
+
+    # Round against the global AV timeline, not each tile independently.
+    # At 32 kHz three 243/221/221-frame chunks would otherwise round to one
+    # sample more than the full 685-frame presentation.
+    sample_rate = 32000
+    tile_frames, overlap = 243, 22
+    delivered = 0
+    audio_lengths = []
+    for trim in (0, overlap, overlap):
+        next_delivered = delivered + tile_frames - trim
+        fake_images = T(np.zeros((tile_frames, 1, 1, 3), dtype=np.float32))
+        fake_audio = T(np.zeros((1, 2, 400000), dtype=np.float32))
+        _, chunk = looping._trim_decoded(
+            fake_images, fake_audio, sample_rate, trim, tile_frames,
+            delivered, next_delivered)
+        audio_lengths.append(chunk.shape[-1])
+        delivered = next_delivered
+    assert delivered == 685
+    assert sum(audio_lengths) == round(delivered / nodes.FPS * sample_rate)
+    print("loop audio: cumulative rounding stays exact across tile seams")
+
     # no latent wired: the pixel path, same offsets, and the fake VAE
     # returns zeros so the blocks must now be zero rather than sliced
     captured.clear()
-    node.apply(
+    pixel_conditioning, _ = node.apply(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22)
-    px = captured["minimax_keyframes"]
+    px = pixel_conditioning[0][1]["minimax_keyframes"]
     assert [kf[nodes.MC_KEY] for kf in px] == idx, "offsets differ by source"
     assert float(px[0]["latent"].a.max()) == 0.0, "did not use the VAE"
     print("pixels path: same %d blocks at the same offsets, encoded rather "

@@ -237,6 +237,42 @@ def _steps_for_frames(n):
     return k if covered == n else None
 
 
+def _merge_motion_keyframes(conditioning, keyframes, frame_count, replace_before):
+    """Replace the head anchors while preserving later tile-local anchors.
+
+    Motion Context used to replace ``minimax_keyframes`` wholesale. That is
+    correct for a plain continuation, but it drops a stock FL2VA last-frame
+    anchor. A looping sampler needs both: the sampled tail owns the head and an
+    optional user/Director keyframe can still own the end of the tile.
+
+    Every retained anchor is marked for the layout patch. Mixing marked and
+    stock anchors alongside a reference is intentionally rejected there,
+    because stock positions do not include the reference-layout offset.
+    """
+    out = []
+    for entry in conditioning:
+        copied = list(entry)
+        values = entry[1].copy()
+        merged = [kf.copy() for kf in keyframes]
+        for keyframe in values.get("minimax_keyframes", []):
+            p = keyframe.get(MC_KEY, keyframe.get("resolved_frame_index"))
+            if p is None:
+                raise ValueError(
+                    "h3_motion_context: a keyframe has no resolved frame index")
+            if p < replace_before:
+                continue
+            kept = keyframe.copy()
+            kept["resolved_frame_index"] = 0
+            kept[MC_KEY] = p
+            merged.append(kept)
+        merged.sort(key=lambda kf: kf[MC_KEY])
+        values["minimax_keyframes"] = merged
+        values["minimax_frame_count"] = frame_count
+        copied[1] = values
+        out.append(copied)
+    return out
+
+
 def _video_tail_from_latent(latent, n):
     """Slice the last n pixel frames of video straight out of a generated
     H3 latent, skipping the h264 decode and the VAE encode.
@@ -535,11 +571,6 @@ class MiniMaxH3MotionContext:
                 "latent": blk,
             })
 
-        values = {
-            "minimax_keyframes": keyframes,
-            "minimax_frame_count": frame_count,
-        }
-
         ref_audio_t = 0
         audio_ref = None
         a_frames = 0
@@ -606,7 +637,8 @@ class MiniMaxH3MotionContext:
             # land first and this one only touches the reference list.
             audio_ref = ref
 
-        out = node_helpers.conditioning_set_values(conditioning, values)
+        out = _merge_motion_keyframes(
+            conditioning, keyframes, frame_count, replace_before=span)
         if audio_ref is not None:
             out = node_helpers.conditioning_set_values(
                 out, {"minimax_refs": [audio_ref]}, append=True)

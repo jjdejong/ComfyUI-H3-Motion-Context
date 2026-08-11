@@ -27,7 +27,20 @@ change produces a clear error rather than a silently wrong render.
 
 import logging
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .nodes import (
+    NODE_CLASS_MAPPINGS as _CONTEXT_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _CONTEXT_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .looping_sampler import MiniMaxH3LoopingSampler
+
+NODE_CLASS_MAPPINGS = {
+    **_CONTEXT_NODE_CLASS_MAPPINGS,
+    "MiniMaxH3LoopingSampler": MiniMaxH3LoopingSampler,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **_CONTEXT_NODE_DISPLAY_NAME_MAPPINGS,
+    "MiniMaxH3LoopingSampler": "MiniMax H3 Looping Sampler",
+}
 
 logging.getLogger("h3_motion_context").info(
     "h3_motion_context: nodes registered. ComfyUI patches install on the "

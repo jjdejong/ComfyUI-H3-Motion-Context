@@ -2,6 +2,35 @@
 
 Chain MiniMax H3 clips so motion and sound keep going across the cut.
 
+The **MiniMax H3 Looping Sampler** runs that chain inside one execution.
+Give it one stock H3 AV latent as the tile shape, a sampler and sigmas, and
+the number of tiles. It samples every tile before loading the VAEs, carries
+the previous joint video/audio latent directly into the next tile, trims the
+pinned head from both decoded streams, and returns one synchronized clip.
+
+The default conditioning supplies the first anchor of tile 1 and the last
+anchor of the final tile. Add `tile_conditioning_N` sockets when a tile needs
+its own prompt or FL2VA end frame. Build those inputs with the stock MiniMax H3
+conditioning nodes: this preserves both the VAE anchor and the text encoder's
+image tokens. A tile-specific first anchor is ignored after tile 1 because the
+sampled motion context owns that boundary.
+
+`tile_conditioning_1` belongs to tile 1, and so on; tiles without an override
+use the default. If an override has a last frame, that frame is the tile's hard
+FL2VA endpoint and its generated tail becomes the next tile's motion context.
+Ref2VA conditionings and their image/video/audio references are supported, but
+Ref2VA references remain whole-clip guidance rather than hard endpoints.
+
+The input tile follows H3's `17k+5` frame grid. With the recommended 22-frame
+context, the first tile contributes its full length and every later tile adds
+`tile_frames - 22`. For example, a 243-frame tile samples about 10.1 seconds;
+each continuation contributes 221 new frames, about 9.2 seconds. The output
+`frame_count` reports the exact assembled length.
+
+The looping node currently supports batch size 1. It returns the last sampled
+joint AV latent as `last_tile_latent`, so another run can continue from the
+actual model output without a decode/re-encode round trip.
+
 Generate clip A. Feed its last frames and audio into this node. Generate
 clip B. B picks up where A left off: same motion, same speed, same
 direction, and the same audio continued rather than a new take that
