@@ -250,6 +250,7 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                         "are supplied.")),
                 io.Autogrow.Input(
                     "tile_latents",
+                    display_name="Tile latents (group)",
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Latent.Input(
                             "tile_latent",
@@ -260,7 +261,9 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                         "Optional per-tile H3 AV latents. Their lengths may "
                         "differ, but their spatial dimensions must match.")),
                 io.Autogrow.Input(
-                    "tile_conditionings", template=conditioning_template,
+                    "tile_conditionings",
+                    display_name="Tile conditionings (group)",
+                    template=conditioning_template,
                     optional=True,
                     tooltip="Overrides the default conditioning by tile. "
                             "Use stock H3 conditioning nodes so prompt image "

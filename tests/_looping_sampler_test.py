@@ -26,6 +26,12 @@ def main():
     spec.loader.exec_module(package)
     looping = sys.modules["h3mc_loop_test.looping_sampler"]
 
+    schema_info = looping.MiniMaxH3LoopingSampler.GET_NODE_INFO_V1()
+    assert schema_info["input"]["optional"]["tile_latents"][1][
+        "display_name"] == "Tile latents (group)"
+    assert schema_info["input"]["optional"]["tile_conditionings"][1][
+        "display_name"] == "Tile conditionings (group)"
+
     def make_latent(video_t, audio_t):
         return {"samples": comfy.nested_tensor.NestedTensor([
             torch.zeros((1, 24, video_t, 2, 2)),

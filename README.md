@@ -18,9 +18,12 @@ image tokens. A tile-specific first anchor is ignored after tile 1 because the
 sampled motion context owns that boundary.
 
 The dynamic sockets are zero-based: `tile_conditioning_0` belongs to tile 1,
-`tile_conditioning_1` to tile 2, and so on. Tiles without an override use the
-default. If an override has a last frame, that frame is the tile's hard FL2VA
-endpoint and its generated tail becomes the next tile's motion context.
+`tile_conditioning_1` to tile 2, and so on. The matching
+`tile_latent_N`/`tile_conditioning_N` names form a pair for tile N+1. The node
+shows one labeled group anchor for each autogrow family; that anchor is not a
+second conditioning slot. Tiles without an override use the default. If an
+override has a last frame, that frame is the tile's hard FL2VA endpoint and its
+generated tail becomes the next tile's motion context.
 Ref2VA conditionings and their image/video/audio references are supported, but
 Ref2VA references remain whole-clip guidance rather than hard endpoints.
 
@@ -77,7 +80,11 @@ Image-to-Video node. There is one active global prompt, not a second hidden
 global prompt in the latent-shape node.
 
 Do not write later prompts as "continue the previous tile" or "the same"; the
-model receives no previous tile text.
+model receives no previous tile text. Write every tile as a self-contained H3
+prompt. For strict base-mode H3 formatting, start the shared global text with
+`integrated_multimodal_description:` and let each tile append its own `[Shot 1]`
+description followed by exactly one `overall_soundscape:` and one
+`non_diegetic_music:` field. The example workflow uses this form.
 
 **MiniMax H3 Multi-Prompt Provider** remains available for text-only tiles. It
 prepends one global prompt to a `|`-separated prompt list and returns the
@@ -87,7 +94,9 @@ If the prompt list is shorter than the requested tile count, the provider's
 final item is repeated. For hard FL2VA endpoints or Ref2VA references, always
 connect stock H3 conditioning nodes to the sampler's zero-based
 `tile_conditioning_N` sockets; those explicit conditionings override the
-provider for their tile.
+provider for their tile. ComfyUI's current autogrow schema cannot nest a
+repeating latent-and-conditioning pair, so the sampler uses the matching names
+above instead of adding a wrapper node per tile.
 
 ## Why this exists
 
