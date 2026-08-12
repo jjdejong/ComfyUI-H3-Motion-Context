@@ -34,6 +34,7 @@ from .nodes import (
 from .looping_sampler import (
     MiniMaxH3LoopingSampler,
     MiniMaxH3LoopingSamplerLoadCheckpoint,
+    MiniMaxH3LoopingSamplerRecover,
     MiniMaxH3MultiPromptProvider,
 )
 from .resolution import MiniMaxH3ResolutionFromImage
@@ -42,6 +43,7 @@ NODE_CLASS_MAPPINGS = {
     **_CONTEXT_NODE_CLASS_MAPPINGS,
     "MiniMaxH3LoopingSampler": MiniMaxH3LoopingSampler,
     "MiniMaxH3LoopingSamplerLoadCheckpoint": MiniMaxH3LoopingSamplerLoadCheckpoint,
+    "MiniMaxH3LoopingSamplerRecover": MiniMaxH3LoopingSamplerRecover,
     "MiniMaxH3MultiPromptProvider": MiniMaxH3MultiPromptProvider,
     "MiniMaxH3ResolutionFromImage": MiniMaxH3ResolutionFromImage,
 }
@@ -49,6 +51,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_CONTEXT_NODE_DISPLAY_NAME_MAPPINGS,
     "MiniMaxH3LoopingSampler": "MiniMax H3 Looping Sampler",
     "MiniMaxH3LoopingSamplerLoadCheckpoint": "Load H3 Looping Checkpoint",
+    "MiniMaxH3LoopingSamplerRecover": "Recover H3 Looping Checkpoints",
     "MiniMaxH3MultiPromptProvider": "MiniMax H3 Multi-Prompt Provider",
     "MiniMaxH3ResolutionFromImage": "MiniMax H3 Resolution From Image",
 }

@@ -6,6 +6,11 @@ import re
 
 import torch
 
+try:
+    from safetensors import safe_open as _st_open
+except ImportError:  # ComfyUI always ships safetensors; belt and braces
+    _st_open = None
+
 import comfy.model_management
 import comfy.nested_tensor
 import comfy.sample
@@ -46,9 +51,10 @@ def _checkpoint_path_parts(checkpoint_prefix):
         prefix, folder_paths.get_output_directory())[:2]
 
 
-def _save_tile_checkpoint(latent, checkpoint_prefix, tile_number):
+def _save_tile_checkpoint(latent, checkpoint_prefix, tile_number,
+                          metadata=None):
     path, = MiniMaxH3MotionContextSaveLatent().save(
-        latent, checkpoint_prefix, clip_index=tile_number)
+        latent, checkpoint_prefix, clip_index=tile_number, metadata=metadata)
     return path
 
 
@@ -69,6 +75,40 @@ def _latest_tile_checkpoint(checkpoint_prefix):
             % (checkpoint_prefix, folder))
     return max(matches, key=lambda item: (os.stat(item[0]).st_mtime_ns,
                                           item[1]))
+
+
+def _tile_checkpoint_path(checkpoint_prefix, tile_number):
+    folder, filename = _checkpoint_path_parts(checkpoint_prefix)
+    path = os.path.join(folder, "%s_%05d.safetensors"
+                        % (filename, int(tile_number)))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            "h3_motion_context: no checkpoint for tile %d at %s"
+            % (int(tile_number), path))
+    return path
+
+
+def _load_tile_checkpoint(checkpoint_prefix, tile_number):
+    if _st_load is None:
+        raise RuntimeError(
+            "h3_motion_context: safetensors is not available; cannot "
+            "load looping checkpoints.")
+    path = _tile_checkpoint_path(checkpoint_prefix, tile_number)
+    data = _st_load(path)
+    if "video" not in data or "audio" not in data:
+        raise ValueError(
+            "h3_motion_context: %s is not a looping H3 checkpoint "
+            "(missing video/audio streams)." % path)
+    metadata = {}
+    if _st_open is not None:
+        with _st_open(path, framework="pt", device="cpu") as handle:
+            metadata = handle.metadata() or {}
+    latent = {
+        "samples": comfy.nested_tensor.NestedTensor([
+            data["video"], data["audio"],
+        ])
+    }
+    return latent, metadata, path
 
 
 def _autogrow_values(values, prefix):
@@ -270,13 +310,77 @@ def _trim_decoded(images, waveform, sample_rate, head_trim, tail_trim,
     start = round(head_trim / FPS * sample_rate)
     want = (round(delivered_end / FPS * sample_rate)
             - round(delivered_start / FPS * sample_rate))
+    missing = start + want - waveform.shape[-1]
+    if missing > 0:
+        max_missing = max(1, round(sample_rate / AUDIO_HZ))
+        if missing > max_missing:
+            raise ValueError(
+                "h3_motion_context: audio VAE decoded %.4fs, but this "
+                "tile needs %.4fs after its context and settling trims"
+                % (waveform.shape[-1] / sample_rate,
+                   (start + want) / sample_rate))
+        _LOG.warning(
+            "h3_motion_context: padding %d decoded audio samples for "
+            "latent/frame rounding", missing)
+        waveform = torch.nn.functional.pad(waveform, (0, missing))
     if waveform.shape[-1] < start + want:
         raise ValueError(
             "h3_motion_context: audio VAE decoded %.4fs, but this tile needs "
             "%.4fs after its context and settling trims"
             % (waveform.shape[-1] / sample_rate,
-               frame_count / FPS))
+               (start + want) / sample_rate))
     return images.cpu(), waveform[..., start:start + want].cpu()
+
+
+def _decode_and_assemble(sampled_tiles, vae, audio_vae, decode_mode,
+                          decode_tile_size):
+    first_video = _streams_from_latent(sampled_tiles[0][0])[0]
+    decode_options = _resolve_decode_options(
+        vae, first_video, decode_mode, decode_tile_size)
+    image_chunks = []
+    audio_chunks = []
+    sample_rate = None
+    delivered_start = 0
+    for tile_index, (sampled, head_trim, tail_trim,
+                     frame_count) in enumerate(sampled_tiles):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        images = _decode_video(vae, sampled, decode_options)
+        waveform, tile_sample_rate = _decode_audio(audio_vae, sampled)
+        if sample_rate is None:
+            sample_rate = tile_sample_rate
+        elif sample_rate != tile_sample_rate:
+            raise ValueError(
+                "h3_motion_context: audio sample rate changed between tiles")
+        delivered_end = delivered_start + frame_count - head_trim - tail_trim
+        images, waveform = _trim_decoded(
+            images, waveform, sample_rate, head_trim, tail_trim, frame_count,
+            delivered_start, delivered_end)
+        image_chunks.append(images)
+        audio_chunks.append(waveform)
+        delivered_start = delivered_end
+        _LOG.info(
+            "h3_motion_context: decoded tile %d/%d -> %d delivered frames",
+            tile_index + 1, len(sampled_tiles), images.shape[0])
+
+    images = torch.cat(image_chunks, dim=0)
+    waveform = torch.cat(audio_chunks, dim=-1)
+    std = torch.std(waveform, dim=[1, 2], keepdim=True) * 5.0
+    std[std < 1.0] = 1.0
+    waveform /= std
+    delivered_frames = sum(
+        frame_count - head_trim - tail_trim
+        for _, head_trim, tail_trim, frame_count in sampled_tiles)
+    if images.shape[0] != delivered_frames:
+        raise RuntimeError(
+            "h3_motion_context: assembled %d frames, planned %d"
+            % (images.shape[0], delivered_frames))
+    expected_samples = round(delivered_frames / FPS * sample_rate)
+    if waveform.shape[-1] != expected_samples:
+        raise RuntimeError(
+            "h3_motion_context: assembled %d audio samples, planned %d"
+            % (waveform.shape[-1], expected_samples))
+    return (images, {"waveform": waveform, "sample_rate": sample_rate},
+            delivered_frames)
 
 
 class MiniMaxH3MultiPromptProvider(io.ComfyNode):
@@ -355,24 +459,117 @@ class MiniMaxH3LoopingSamplerLoadCheckpoint(io.ComfyNode):
 
     @classmethod
     def execute(cls, checkpoint_prefix):
-        if _st_load is None:
-            raise RuntimeError(
-                "h3_motion_context: safetensors is not available; cannot "
-                "load looping checkpoints.")
         path, tile_number = _latest_tile_checkpoint(checkpoint_prefix)
-        data = _st_load(path)
-        if "video" not in data or "audio" not in data:
-            raise ValueError(
-                "h3_motion_context: %s is not a looping H3 checkpoint "
-                "(missing video/audio streams)." % path)
-        latent = {
-            "samples": comfy.nested_tensor.NestedTensor([
-                data["video"], data["audio"],
-            ])
-        }
+        latent, _, _ = _load_tile_checkpoint(checkpoint_prefix, tile_number)
         _LOG.info("h3_motion_context: loaded looping checkpoint tile %d from %s",
                   tile_number, path)
         return io.NodeOutput(latent, tile_number, path)
+
+
+class MiniMaxH3LoopingSamplerRecover(io.ComfyNode):
+    """Decode and assemble completed looping-sampler checkpoints."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoopingSamplerRecover",
+            display_name="Recover H3 Looping Checkpoints",
+            category="sampling/minimax",
+            description=(
+                "Decode numbered H3 looping checkpoints and rebuild the "
+                "assembled video without resampling."),
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Vae.Input("audio_vae"),
+                io.String.Input(
+                    "checkpoint_prefix",
+                    default="h3_context/looping_checkpoint",
+                    tooltip="The prefix used by the looping sampler."),
+                io.Int.Input("tiles", default=3, min=1, max=64),
+                io.Combo.Input(
+                    "context_frames", options=["22", "5", "39", "56"],
+                    default="22",
+                    tooltip=(
+                        "Used for legacy checkpoints without trim metadata; "
+                        "new checkpoints retain their actual head trim.")),
+                io.Int.Input(
+                    "settling_tail_frames", default=0, min=0, max=4096,
+                    step=17,
+                    tooltip=(
+                        "Used for legacy checkpoints without trim metadata; "
+                        "new checkpoints retain their actual settling trim.")),
+                io.Combo.Input(
+                    "decode_mode", options=["auto", "advanced"],
+                    default="auto",
+                    tooltip=(
+                        "Auto uses H3's conservative 256 pixel spatial tile.")),
+                io.Combo.Input(
+                    "decode_tile_size",
+                    options=[str(value) for value in DECODE_TILE_SIZES],
+                    default="512",
+                    tooltip=(
+                        "Advanced H3 VAE spatial tile size in output pixels.")),
+            ],
+            outputs=[
+                io.Image.Output(display_name="images"),
+                io.Audio.Output(display_name="audio"),
+                io.Latent.Output(display_name="last_tile_latent"),
+                io.Int.Output(display_name="frame_count"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, vae, audio_vae, checkpoint_prefix, tiles,
+                context_frames, settling_tail_frames=0, decode_mode="auto",
+                decode_tile_size="512"):
+        tiles = int(tiles)
+        context_frames = int(context_frames)
+        settling_tail_frames = int(settling_tail_frames)
+        if settling_tail_frames < 0 or settling_tail_frames % 17:
+            raise ValueError(
+                "h3_motion_context: settling_tail_frames must be a "
+                "non-negative multiple of 17")
+
+        sampled_tiles = []
+        for tile_index in range(tiles):
+            sampled, metadata, path = _load_tile_checkpoint(
+                checkpoint_prefix, tile_index + 1)
+            parts = _streams_from_latent(sampled)
+            if (len(parts) != 2 or parts[0].ndim != 5
+                    or parts[1].ndim != 4):
+                raise ValueError(
+                    "h3_motion_context: checkpoint %d is not an H3 joint "
+                    "AV latent" % (tile_index + 1))
+            if parts[0].shape[0] != 1 or parts[1].shape[0] != 1:
+                raise ValueError(
+                    "h3_motion_context: recovery currently supports batch "
+                    "size 1")
+            frame_count = _pixel_frames(int(parts[0].shape[2]))
+            head_trim = int(metadata.get(
+                "head_trim", context_frames if tile_index else 0))
+            tail_trim = int(metadata.get(
+                "tail_trim",
+                settling_tail_frames if tile_index < tiles - 1 else 0))
+            if head_trim < 0 or tail_trim < 0:
+                raise ValueError(
+                    "h3_motion_context: checkpoint %d has negative trim "
+                    "metadata" % (tile_index + 1))
+            if head_trim + tail_trim >= frame_count:
+                raise ValueError(
+                    "h3_motion_context: checkpoint %d trims %d of %d "
+                    "frames" % (tile_index + 1, head_trim + tail_trim,
+                                frame_count))
+            _LOG.info(
+                "h3_motion_context: recovering tile %d/%d from %s, %d "
+                "frames, head trim %d, settling trim %d",
+                tile_index + 1, tiles, path, frame_count, head_trim,
+                tail_trim)
+            sampled_tiles.append((sampled, head_trim, tail_trim, frame_count))
+
+        images, audio, delivered_frames = _decode_and_assemble(
+            sampled_tiles, vae, audio_vae, decode_mode, decode_tile_size)
+        return io.NodeOutput(
+            images, audio, sampled_tiles[-1][0], delivered_frames)
 
 
 class MiniMaxH3LoopingSampler(io.ComfyNode):
@@ -587,7 +784,15 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             sampled = _copy_latent(sampled, device="cpu")
             if checkpoint_prefix:
                 checkpoint_path = _save_tile_checkpoint(
-                    sampled, checkpoint_prefix, tile_index + 1)
+                    sampled, checkpoint_prefix, tile_index + 1,
+                    metadata={
+                        "tiles": tiles,
+                        "tile_number": tile_index + 1,
+                        "frame_count": frame_count,
+                        "head_trim": head_trim,
+                        "tail_trim": tail_trim,
+                        "context_frames": context_frames,
+                    })
                 _LOG.info(
                     "h3_motion_context: checkpointed completed tile %d/%d to %s",
                     tile_index + 1, tiles, checkpoint_path)
@@ -602,51 +807,9 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                     audio_steps)
             sampled_tiles.append((sampled, head_trim, tail_trim, frame_count))
 
-        first_video = _streams_from_latent(sampled_tiles[0][0])[0]
-        decode_options = _resolve_decode_options(
-            vae, first_video, decode_mode, decode_tile_size)
-        image_chunks = []
-        audio_chunks = []
-        sample_rate = None
-        delivered_start = 0
-        for tile_index, (sampled, head_trim, tail_trim, frame_count) in enumerate(sampled_tiles):
-            comfy.model_management.throw_exception_if_processing_interrupted()
-            images = _decode_video(vae, sampled, decode_options)
-            waveform, tile_sample_rate = _decode_audio(audio_vae, sampled)
-            if sample_rate is None:
-                sample_rate = tile_sample_rate
-            elif sample_rate != tile_sample_rate:
-                raise ValueError(
-                    "h3_motion_context: audio sample rate changed between tiles")
-            delivered_end = delivered_start + frame_count - head_trim - tail_trim
-            images, waveform = _trim_decoded(
-                images, waveform, sample_rate, head_trim, tail_trim, frame_count,
-                delivered_start, delivered_end)
-            image_chunks.append(images)
-            audio_chunks.append(waveform)
-            delivered_start = delivered_end
-            _LOG.info(
-                "h3_motion_context: decoded tile %d/%d -> %d delivered frames",
-                tile_index + 1, tiles, images.shape[0])
-
-        images = torch.cat(image_chunks, dim=0)
-        waveform = torch.cat(audio_chunks, dim=-1)
-        std = torch.std(waveform, dim=[1, 2], keepdim=True) * 5.0
-        std[std < 1.0] = 1.0
-        waveform /= std
-        delivered_frames = sum(
-            frame_count - head_trim - tail_trim
-            for _, head_trim, tail_trim, frame_count in sampled_tiles)
-        if images.shape[0] != delivered_frames:
-            raise RuntimeError(
-                "h3_motion_context: assembled %d frames, planned %d"
-                % (images.shape[0], delivered_frames))
-        expected_samples = round(delivered_frames / FPS * sample_rate)
-        if waveform.shape[-1] != expected_samples:
-            raise RuntimeError(
-                "h3_motion_context: assembled %d audio samples, planned %d"
-                % (waveform.shape[-1], expected_samples))
+        images, audio, delivered_frames = _decode_and_assemble(
+            sampled_tiles, vae, audio_vae, decode_mode, decode_tile_size)
 
         return io.NodeOutput(
-            images, {"waveform": waveform, "sample_rate": sample_rate},
+            images, audio,
             sampled_tiles[-1][0], delivered_frames)

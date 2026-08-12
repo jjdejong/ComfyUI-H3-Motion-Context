@@ -59,6 +59,18 @@ with the same prefix. It returns the newest completed joint AV latent, its
 tile number, and its file path. The latent is decodable with the standard H3
 VAE, unlike the context-only Motion Context Load Latent output.
 
+To rebuild a failed multi-tile run, use **Recover H3 Looping Checkpoints**.
+Connect the same video and audio VAEs, enter the number of completed tiles,
+and use the same checkpoint prefix. It loads slots 1 through N, removes the
+inherited context from later tiles, and returns the assembled IMAGE, AUDIO,
+last-tile latent, and frame count without invoking the model or sampler. New
+checkpoints retain their actual head and settling trims. Checkpoints written
+by older versions have no trim metadata, so enter the context and settling
+values used by that run; for the current default configuration use 22 context
+frames and 0 settling frames. The recovery node also tolerates the H3 audio
+VAE's bounded sub-frame rounding shortfall and pads it to the exact video
+duration.
+
 ## Example workflow
 
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)

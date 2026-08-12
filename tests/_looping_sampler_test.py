@@ -29,6 +29,9 @@ def main():
     looping = sys.modules["h3mc_loop_test.looping_sampler"]
 
     schema_info = looping.MiniMaxH3LoopingSampler.GET_NODE_INFO_V1()
+    recovery_schema = looping.MiniMaxH3LoopingSamplerRecover.GET_NODE_INFO_V1()
+    assert recovery_schema["output_name"] == [
+        "images", "audio", "last_tile_latent", "frame_count"]
     assert schema_info["input"]["optional"]["tile_latents"][1][
         "display_name"] == "Tile latents (group)"
     assert schema_info["input"]["optional"]["tile_conditionings"][1][
@@ -145,6 +148,59 @@ def main():
         finally:
             looping.folder_paths.get_output_directory = original_output_directory
     print("checkpoint recovery: newest completed AV tile loaded for decoding")
+
+    with tempfile.TemporaryDirectory() as checkpoint_dir:
+        original_output_directory = looping.folder_paths.get_output_directory
+        looping.folder_paths.get_output_directory = lambda: checkpoint_dir
+        try:
+            for tile_number, tile in enumerate(
+                    (latent, tile_latents["tile_latent_1"],
+                     tile_latents["tile_latent_2"]), 1):
+                looping._save_tile_checkpoint(
+                    tile, "recover_run", tile_number,
+                    metadata={
+                        "head_trim": 0 if tile_number == 1 else 22,
+                        "tail_trim": 0,
+                    })
+            recovered = looping.MiniMaxH3LoopingSamplerRecover.execute(
+                vae=VideoVAE(), audio_vae=AudioVAE(),
+                checkpoint_prefix="recover_run", tiles=3,
+                context_frames="39", settling_tail_frames=17,
+                decode_mode="advanced", decode_tile_size="512")
+            recovered_images, recovered_audio, recovered_last, recovered_frames = (
+                recovered.args)
+            assert recovered_frames == 379
+            assert recovered_images.shape == (379, 32, 32, 3)
+            assert recovered_audio["waveform"].shape[-1] == round(
+                recovered_frames / 24 * 32000)
+            assert recovered_last["samples"].unbind()[0].shape[2] == 47
+        finally:
+            looping.folder_paths.get_output_directory = original_output_directory
+    print("checkpoint recovery: all numbered tiles decoded and assembled")
+
+    short_audio = torch.zeros((1, 2, round(158 / 24 * 32000) - 267))
+    _, padded_audio = looping._trim_decoded(
+        torch.zeros((158, 32, 32, 3)), short_audio, 32000, 0, 0, 158, 0, 158)
+    assert padded_audio.shape[-1] == round(158 / 24 * 32000)
+    print("audio rounding: bounded VAE shortfall is padded")
+
+    class ShortAudioVAE(AudioVAE):
+        def decode(self, audio):
+            waveform = super().decode(audio)
+            return waveform[:, :-267]
+
+    short_result = looping.MiniMaxH3LoopingSampler.execute(
+        model=object(), positive=[[torch.zeros((1, 1)), {}]],
+        vae=VideoVAE(), audio_vae=ShortAudioVAE(), sampler=object(),
+        sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
+        context_frames="22", seed=100,
+        prompt_conditionings=prompt_result.args[0], tile_latents=tile_latents,
+        decode_mode="advanced", decode_tile_size="512", checkpoint_prefix="")
+    _, short_audio_output, _, short_frames = short_result.args
+    assert short_frames == 379
+    assert short_audio_output["waveform"].shape[-1] == round(
+        short_frames / 24 * 32000)
+    print("looping sampler: bounded audio shortfall no longer aborts assembly")
 
     class BrokenVideoVAE(VideoVAE):
         def decode(self, video, vae_options=None):

@@ -931,7 +931,7 @@ class MiniMaxH3MotionContextSaveLatent:
                    "Context node can pin audio from it via the matching "
                    "Load node.")
 
-    def save(self, latent, filename_prefix, clip_index=0):
+    def save(self, latent, filename_prefix, clip_index=0, metadata=None):
         if _st_save is None:
             raise RuntimeError("h3_motion_context: safetensors is not "
                                "available; cannot save latents.")
@@ -955,8 +955,12 @@ class MiniMaxH3MotionContextSaveLatent:
         else:
             path = os.path.join(folder, "%s_%05d_.safetensors"
                                 % (filename, counter))
+        save_metadata = {"format": "h3_motion_context_av_v1"}
+        if metadata:
+            save_metadata.update({str(key): str(value)
+                                  for key, value in metadata.items()})
         _st_save({"video": video, "audio": audio}, path,
-                 metadata={"format": "h3_motion_context_av_v1"})
+                 metadata=save_metadata)
         _LOG.info("h3_motion_context: saved AV latent to %s (video %s, "
                   "audio %s)", path, tuple(video.shape), tuple(audio.shape))
         return (path,)
