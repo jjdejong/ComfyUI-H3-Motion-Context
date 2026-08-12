@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 
 import torch
 
@@ -112,7 +113,8 @@ def main():
         sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
         context_frames="22", seed=100,
         prompt_conditionings=prompt_result.args[0], tile_latents=tile_latents,
-        decode_mode="advanced", decode_tile_size="512")
+        decode_mode="advanced", decode_tile_size="512",
+        checkpoint_prefix="")
     images, audio, last_latent, delivered_frames = result.args
 
     assert [seed for seed, _ in calls] == [100, 101, 102]
@@ -124,6 +126,54 @@ def main():
     assert decode_calls == [{
         "decode_options": {"tile_size": 512, "tile_overlap": 128},
     }] * 3
+
+    with tempfile.TemporaryDirectory() as checkpoint_dir:
+        original_output_directory = looping.folder_paths.get_output_directory
+        looping.folder_paths.get_output_directory = lambda: checkpoint_dir
+        try:
+            path = looping._save_tile_checkpoint(
+                last_latent, "h3_checkpoint", 3)
+            loaded, tile_number, loaded_path = (
+                looping.MiniMaxH3LoopingSamplerLoadCheckpoint.execute(
+                    "h3_checkpoint").args)
+            assert tile_number == 3
+            assert loaded_path == path
+            assert loaded["samples"].unbind()[0].device.type == "cpu"
+            for expected, actual in zip(last_latent["samples"].unbind(),
+                                        loaded["samples"].unbind()):
+                assert torch.equal(expected, actual)
+        finally:
+            looping.folder_paths.get_output_directory = original_output_directory
+    print("checkpoint recovery: newest completed AV tile loaded for decoding")
+
+    class BrokenVideoVAE(VideoVAE):
+        def decode(self, video, vae_options=None):
+            raise RuntimeError("synthetic decode failure")
+
+    with tempfile.TemporaryDirectory() as checkpoint_dir:
+        original_output_directory = looping.folder_paths.get_output_directory
+        looping.folder_paths.get_output_directory = lambda: checkpoint_dir
+        try:
+            try:
+                looping.MiniMaxH3LoopingSampler.execute(
+                    model=object(), positive=[[torch.zeros((1, 1)), {}]],
+                    vae=BrokenVideoVAE(), audio_vae=AudioVAE(),
+                    sampler=object(), sigmas=torch.tensor([1.0, 0.0]),
+                    latent=latent, tiles=3, context_frames="22", seed=100,
+                    prompt_conditionings=prompt_result.args[0],
+                    tile_latents=tile_latents, decode_mode="advanced",
+                    decode_tile_size="512", checkpoint_prefix="failed_run")
+            except RuntimeError as error:
+                assert "synthetic decode failure" in str(error)
+            else:
+                raise AssertionError("synthetic decode failure was swallowed")
+            _, tile_number, _ = (
+                looping.MiniMaxH3LoopingSamplerLoadCheckpoint.execute(
+                    "failed_run").args)
+            assert tile_number == 3
+        finally:
+            looping.folder_paths.get_output_directory = original_output_directory
+    print("failure recovery: tile 3 checkpoint survived a decode exception")
 
     class MemoryVAE:
         upscale_ratio = (None, 16, 16)
@@ -151,7 +201,8 @@ def main():
             model=object(), positive=[[torch.zeros((1, 1)), {}]],
             vae=VideoVAE(), audio_vae=AudioVAE(), sampler=object(),
             sigmas=torch.tensor([1.0, 0.0]), latent=latent, tiles=3,
-            context_frames="22", seed=100, settling_tail_frames=1)
+            context_frames="22", seed=100, settling_tail_frames=1,
+            checkpoint_prefix="")
     except ValueError as error:
         assert "multiple of 17" in str(error)
     else:
@@ -213,7 +264,7 @@ def main():
             "tile_conditioning_0": anchored(124),
             "tile_conditioning_1": anchored(141),
             "tile_conditioning_2": anchored(158),
-        }, settling_tail_frames=17)
+        }, settling_tail_frames=17, checkpoint_prefix="")
     _, anchored_audio, _, anchored_frames = anchored_result.args
     assert anchored_frames == (124 - 17) + (141 - 22 - 17) + (158 - 22)
     assert anchored_audio["waveform"].shape[-1] == round(
@@ -235,7 +286,7 @@ def main():
             "tile_conditioning_0": unanchored(124),
             "tile_conditioning_1": unanchored(141),
             "tile_conditioning_2": anchored(158),
-        }, settling_tail_frames=17)
+        }, settling_tail_frames=17, checkpoint_prefix="")
     _, plain_audio, _, plain_frames = plain_result.args
     assert plain_frames == 379
     assert plain_audio["waveform"].shape[-1] == round(379 / 24 * 32000)

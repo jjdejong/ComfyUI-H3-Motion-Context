@@ -1,6 +1,8 @@
 """Temporal tiled sampling for long MiniMax H3 audio-video generations."""
 
 import logging
+import os
+import re
 
 import torch
 
@@ -8,6 +10,7 @@ import comfy.model_management
 import comfy.nested_tensor
 import comfy.sample
 import comfy.utils
+import folder_paths
 import latent_preview
 from comfy_api.latest import io
 from comfy_extras.nodes_custom_sampler import Guider_Basic
@@ -17,8 +20,10 @@ from .nodes import (
     FPS,
     MC_KEY,
     MiniMaxH3MotionContext,
+    MiniMaxH3MotionContextSaveLatent,
     _ensure_layout_patch,
     _ensure_payload_patch,
+    _st_load,
     _pixel_frames,
     _steps_for_frames,
     _streams_from_latent,
@@ -29,6 +34,41 @@ _LOG = logging.getLogger("h3_motion_context")
 DECODE_TILE_SIZES = (256, 384, 512, 768, 1024, 1536, 2048)
 DECODE_TILE_OVERLAP_MIN = 64
 DECODE_MEMORY_MARGIN = 1.35
+
+
+def _checkpoint_path_parts(checkpoint_prefix):
+    prefix = (checkpoint_prefix or "").strip().strip('"').strip("'")
+    if not prefix:
+        raise ValueError(
+            "h3_motion_context: checkpoint_prefix is empty; checkpointing "
+            "is disabled")
+    return folder_paths.get_save_image_path(
+        prefix, folder_paths.get_output_directory())[:2]
+
+
+def _save_tile_checkpoint(latent, checkpoint_prefix, tile_number):
+    path, = MiniMaxH3MotionContextSaveLatent().save(
+        latent, checkpoint_prefix, clip_index=tile_number)
+    return path
+
+
+def _latest_tile_checkpoint(checkpoint_prefix):
+    folder, filename = _checkpoint_path_parts(checkpoint_prefix)
+    pattern = re.compile(
+        r"^%s_(\d{5})\.safetensors$" % re.escape(filename))
+    matches = []
+    for name in os.listdir(folder):
+        match = pattern.match(name)
+        if match:
+            path = os.path.join(folder, name)
+            matches.append((path, int(match.group(1))))
+    if not matches:
+        raise FileNotFoundError(
+            "h3_motion_context: no looping checkpoints for %r in %s. "
+            "Run the sampler with checkpointing enabled first."
+            % (checkpoint_prefix, folder))
+    return max(matches, key=lambda item: (os.stat(item[0]).st_mtime_ns,
+                                          item[1]))
 
 
 def _autogrow_values(values, prefix):
@@ -294,6 +334,60 @@ class MiniMaxH3MultiPromptProvider(io.ComfyNode):
         return io.NodeOutput(encoded)
 
 
+class MiniMaxH3LoopingSamplerLoadCheckpoint(io.ComfyNode):
+    """Load the last tile saved by a looping sampler checkpoint."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3LoopingSamplerLoadCheckpoint",
+            display_name="Load H3 Looping Checkpoint",
+            category="conditioning/minimax",
+            description=(
+                "Recover the newest completed H3 tile after a sampler or "
+                "decoder failure."),
+            inputs=[io.String.Input(
+                "checkpoint_prefix", default="h3_context/looping_checkpoint",
+                tooltip=(
+                    "The same prefix used by MiniMax H3 Looping Sampler. "
+                    "The newest completed tile is loaded."))],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="tile_number"),
+                io.String.Output(display_name="checkpoint_path"),
+            ],
+        )
+
+    @classmethod
+    def IS_CHANGED(cls, checkpoint_prefix):
+        try:
+            path, _ = _latest_tile_checkpoint(checkpoint_prefix)
+            return "%s:%d" % (path, os.stat(path).st_mtime_ns)
+        except (FileNotFoundError, OSError, ValueError):
+            return float("NaN")
+
+    @classmethod
+    def execute(cls, checkpoint_prefix):
+        if _st_load is None:
+            raise RuntimeError(
+                "h3_motion_context: safetensors is not available; cannot "
+                "load looping checkpoints.")
+        path, tile_number = _latest_tile_checkpoint(checkpoint_prefix)
+        data = _st_load(path)
+        if "video" not in data or "audio" not in data:
+            raise ValueError(
+                "h3_motion_context: %s is not a looping H3 checkpoint "
+                "(missing video/audio streams)." % path)
+        latent = {
+            "samples": comfy.nested_tensor.NestedTensor([
+                data["video"], data["audio"],
+            ])
+        }
+        _LOG.info("h3_motion_context: loaded looping checkpoint tile %d from %s",
+                  tile_number, path)
+        return io.NodeOutput(latent, tile_number, path)
+
+
 class MiniMaxH3LoopingSampler(io.ComfyNode):
     """Sample H3 windows sequentially and carry their joint AV latent tail."""
 
@@ -382,6 +476,14 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                     tooltip="Overrides the default conditioning by tile. "
                             "Use stock H3 conditioning nodes so prompt image "
                             "tokens and FL2VA end anchors stay intact."),
+                io.String.Input(
+                    "checkpoint_prefix",
+                    default="h3_context/looping_checkpoint",
+                    optional=True,
+                    tooltip=(
+                        "Save each completed tile as an AV latent before "
+                        "decoding. A recovery node can load the newest "
+                        "checkpoint after a failure. Leave blank to disable.")),
             ],
             outputs=[
                 io.Image.Output(display_name="images"),
@@ -396,7 +498,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                 latent, tiles, context_frames, seed,
                 prompt_conditionings=None, tile_conditionings=None,
                 tile_latents=None, settling_tail_frames=0,
-                decode_mode="auto", decode_tile_size="512"):
+                decode_mode="auto", decode_tile_size="512",
+                checkpoint_prefix="h3_context/looping_checkpoint"):
         tiles = int(tiles)
         context_frames = int(context_frames)
         settling_tail_frames = int(settling_tail_frames)
@@ -496,6 +599,12 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
             sampled = _sample_tile(
                 model, conditioning, sampler, sigmas, target, tile_seed)
             sampled = _copy_latent(sampled, device="cpu")
+            if checkpoint_prefix:
+                checkpoint_path = _save_tile_checkpoint(
+                    sampled, checkpoint_prefix, tile_index + 1)
+                _LOG.info(
+                    "h3_motion_context: checkpointed completed tile %d/%d to %s",
+                    tile_index + 1, tiles, checkpoint_path)
             previous = sampled
             if tail_trim:
                 previous, video_steps, audio_steps = _slice_latent_prefix(

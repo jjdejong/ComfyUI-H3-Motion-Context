@@ -52,6 +52,14 @@ The looping node currently supports batch size 1. It returns the last sampled
 joint AV latent as `last_tile_latent`, so another run can continue from the
 actual model output without a decode/re-encode round trip.
 
+The sampler also checkpoints each completed tile before decoding. The default
+prefix is `h3_context/looping_checkpoint`; change it if multiple chains need
+separate recovery files, or leave it blank to disable checkpointing. If a run
+fails, bypass the failed sampler branch and use **Load H3 Looping Checkpoint**
+with the same prefix. It returns the newest completed joint AV latent, its
+tile number, and its file path. The latent is decodable with the standard H3
+VAE, unlike the context-only Motion Context Load Latent output.
+
 ## Example workflow
 
 Load [`example_workflows/minimax_h3_looping.json`](example_workflows/minimax_h3_looping.json)
