@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-h3-motion-context"
-description = "Clip chaining and temporal tiled sampling for MiniMax H3 in ComfyUI, with joint picture and sound continuity."
+description = "Clip chaining and temporal tiled sampling for MiniMax H3 in ComfyUI, with joint picture and sound continuity and seam probing."
 version = "0.3.0"
 license = { file = "LICENSE" }
 readme = "README.md"

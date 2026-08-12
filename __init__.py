@@ -49,6 +49,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MultiPromptProvider": "MiniMax H3 Multi-Prompt Provider",
     "MiniMaxH3ResolutionFromImage": "MiniMax H3 Resolution From Image",
 }
+from .probe_node import (
+    NODE_CLASS_MAPPINGS as _PROBE_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _PROBE_NAMES,
+)
+
+NODE_CLASS_MAPPINGS.update(_PROBE_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_PROBE_NAMES)
 
 logging.getLogger("h3_motion_context").info(
     "h3_motion_context: nodes registered. ComfyUI patches install on the "
