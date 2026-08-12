@@ -40,13 +40,12 @@ intermediate tiles; unanchored motion and the final tile are left intact. The
 audio prefix uses H3's 40 Hz grid (`round(frames * 40 / 24)`), while decoded
 audio is accumulated with the same global sample rounding as the video.
 
-The sampler's `decode_mode` defaults to `auto`. After sampling and immediately
-before decoding, it uses the current VAE memory estimate to choose the largest
-safe spatial tile from 256 through 2048 pixels, then uses that choice for every
-tile in the run. `advanced` uses the selected `decode_tile_size` instead. H3's
-native temporal decoder remains fixed at its 17-frame chunking; changing that
-would alter the VAE's latent-to-frame mapping rather than simply changing its
-memory use.
+The sampler's `decode_mode` defaults to `auto` and uses H3's native conservative
+256-pixel spatial tile. Free VRAM is not enough to prove that a larger tile is
+valid for the selected device attention kernel, so larger values are reserved
+for explicit `advanced` mode. H3's native temporal decoder remains fixed at its
+17-frame chunking; changing that would alter the VAE's latent-to-frame mapping
+rather than simply changing its memory use.
 
 The looping node currently supports batch size 1. It returns the last sampled
 joint AV latent as `last_tile_latent`, so another run can continue from the

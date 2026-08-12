@@ -175,26 +175,9 @@ def main():
             looping.folder_paths.get_output_directory = original_output_directory
     print("failure recovery: tile 3 checkpoint survived a decode exception")
 
-    class MemoryVAE:
-        upscale_ratio = (None, 16, 16)
-        vae_dtype = torch.float16
-
-        class Patcher:
-            def get_free_memory(self, device):
-                return 1_000_000_000
-
-            def model_size(self):
-                return 0
-
-        patcher = Patcher()
-        device = torch.device("cpu")
-
-        def memory_used_decode(self, shape, dtype):
-            return shape[-1] ** 2 * 100_000
-
     auto_options = looping._resolve_decode_options(
-        MemoryVAE(), torch.zeros((1, 24, 7, 1, 1)), "auto", "512")
-    assert auto_options == {"tile_size": 1024, "tile_overlap": 256}
+        object(), torch.zeros((1, 24, 7, 1, 1)), "auto", "512")
+    assert auto_options == {"tile_size": 256, "tile_overlap": 64}
 
     try:
         looping.MiniMaxH3LoopingSampler.execute(

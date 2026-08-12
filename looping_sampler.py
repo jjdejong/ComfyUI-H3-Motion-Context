@@ -33,7 +33,7 @@ _LOG = logging.getLogger("h3_motion_context")
 
 DECODE_TILE_SIZES = (256, 384, 512, 768, 1024, 1536, 2048)
 DECODE_TILE_OVERLAP_MIN = 64
-DECODE_MEMORY_MARGIN = 1.35
+AUTO_DECODE_TILE_SIZE = 256
 
 
 def _checkpoint_path_parts(checkpoint_prefix):
@@ -225,15 +225,6 @@ def _decode_video(vae, latent, decode_options=None):
     return images
 
 
-def _decode_memory_requirement(vae, video, tile_size):
-    spatial_scale = int(vae.upscale_ratio[1])
-    latent_tile_size = max(1, tile_size // spatial_scale)
-    shape = (video.shape[0], video.shape[1], video.shape[2],
-             latent_tile_size, latent_tile_size)
-    return (vae.patcher.model_size()
-            + vae.memory_used_decode(shape, vae.vae_dtype))
-
-
 def _resolve_decode_options(vae, video, decode_mode, decode_tile_size):
     if str(decode_mode or "auto") == "advanced":
         tile_size = int(decode_tile_size)
@@ -242,18 +233,14 @@ def _resolve_decode_options(vae, video, decode_mode, decode_tile_size):
                 "h3_motion_context: decode_tile_size must be one of %s"
                 % ", ".join(str(value) for value in DECODE_TILE_SIZES))
     else:
-        tile_size = DECODE_TILE_SIZES[0]
-        try:
-            free_memory = vae.patcher.get_free_memory(vae.device)
-            for candidate in reversed(DECODE_TILE_SIZES):
-                required = _decode_memory_requirement(vae, video, candidate)
-                if required * DECODE_MEMORY_MARGIN <= free_memory:
-                    tile_size = candidate
-                    break
-        except (AttributeError, TypeError, ValueError):
-            _LOG.warning(
-                "h3_motion_context: could not estimate H3 VAE decode "
-                "memory; using 256 pixel tiles")
+        # The H3 VAE's native tile is 256 pixels. Larger tiles can pass the
+        # Python-side validation but still exceed limits in the selected
+        # device attention kernel; free VRAM is not a sufficient safety test.
+        tile_size = AUTO_DECODE_TILE_SIZE
+        _LOG.info(
+            "h3_motion_context: auto H3 VAE decode uses the conservative "
+            "%d pixel spatial tile; larger tiles require Advanced mode",
+            tile_size)
 
     tile_overlap = max(DECODE_TILE_OVERLAP_MIN, tile_size // 4)
     _LOG.info(
@@ -438,9 +425,8 @@ class MiniMaxH3LoopingSampler(io.ComfyNode):
                     "decode_mode", options=["auto", "advanced"],
                     default="auto",
                     tooltip=(
-                        "Auto selects the largest safe H3 spatial tile "
-                        "immediately before decoding. Advanced uses the "
-                        "selected tile size.")),
+                        "Auto uses H3's conservative 256 pixel spatial tile. "
+                        "Advanced uses the selected tile size.")),
                 io.Combo.Input(
                     "decode_tile_size",
                     options=[str(value) for value in DECODE_TILE_SIZES],
