@@ -178,14 +178,29 @@ def main():
     sys.modules["h3mc_pkg"] = pkg
     spec.loader.exec_module(pkg)  # registers nodes; patches apply on first run
     nodes = sys.modules["h3mc_pkg.nodes"]
+
+    def audio_kf():
+        """The one keyframe carrying pinned audio, from the last apply()."""
+        got = [k for k in captured["minimax_keyframes"]
+               if k.get("audio_latent") is not None]
+        assert len(got) == 1, "expected 1 pinned audio keyframe, got %d" % len(got)
+        return got[0]
+
+    def audio_end():
+        """Target frame the pinned audio window ends at.
+
+        Stock places the window STARTING at the anchor index and running
+        forward, so the end is the index plus the window's own width in
+        pixel frames. That is the number the node solved for.
+        """
+        kf = audio_kf()
+        return (kf["resolved_frame_index"]
+                + kf["audio_latent"].shape[-1] / nodes.FRAME_RESCALE)
     assert pkg.NODE_CLASS_MAPPINGS
     # importing the pack must not have touched ComfyUI yet
-    assert not nodes._layout_patch_applied(), \
-        "the layout patch was applied at import time"
-    assert not nodes._payload_patch_applied(), \
-        "the payload patch was applied at import time"
-    assert mm.PackedLayout.__init__.__name__ != "_patched_init", \
-        "the constructor was wrapped at import time"
+    assert not nodes._layout_checked(), \
+        "the layout checks ran at import time"
+    stock_init = mm.PackedLayout.__init__
 
     # a 124-frame clip: latent_t 37 (7 full 17-frame groups + 1 + 4),
     # audio grid ceil(124 * 5/3) = 207 steps, overhang exactly 1/3
@@ -212,24 +227,51 @@ def main():
             return T(np.zeros((1, 16, steps, h, w), dtype=np.float32))
 
     node = nodes.MiniMaxH3MotionContext()
-    out, trim = node.apply(
+
+    def run(**kw):
+        """apply(), capturing the conditioning it returns.
+
+        The node used to reach node_helpers to append its audio reference,
+        which is where these assertions used to read the result from. It
+        now builds the conditioning itself and touches no reference list,
+        so read what it actually hands the sampler.
+        """
+        got = node.apply(**kw)
+        captured.clear()
+        captured.update(got[0][0][1])
+        return got
+    out, trim = run(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22, context_latent=prev)
 
-    # ... and running one must have installed both
-    assert nodes._layout_patch_applied() and nodes._payload_patch_applied()
-    assert mm.PackedLayout.__init__.__name__ == "_patched_init"
+    # ... and running one must have checked the layout, and left it alone
+    assert nodes._layout_checked(), "the layout checks did not run"
+    assert mm.PackedLayout.__init__ is stock_init, \
+        "ComfyUI's constructor was modified"
 
     kfs = captured["minimax_keyframes"]
-    assert len(kfs) == 7, len(kfs)
-    idx = [kf[nodes.MC_KEY] for kf in kfs]
+    # video keyframes carry a latent, the pinned audio is one more
+    # keyframe carrying only an audio latent, and it goes last
+    vid = [kf for kf in kfs if kf.get("latent") is not None]
+    aud = [kf for kf in kfs if kf.get("audio_latent") is not None]
+    assert len(kfs) == 8 and len(vid) == 7 and len(aud) == 1, len(kfs)
+    assert kfs[-1] is aud[0], "the audio keyframe is not last"
+    assert "minimax_refs" not in captured, \
+        "the pinned audio went out as a reference, not a keyframe"
+    idx = [kf["resolved_frame_index"] for kf in vid]
     assert idx == [0, 1, 5, 9, 13, 17, 18], idx
-    assert captured["minimax_frame_count"] == frames
+    assert "minimax_frame_count" not in captured
     assert trim == 22
 
-    ref = captured["minimax_refs"][0]
-    assert ref["kind"] == "audio"
+    # the index is rt / FRAME_RESCALE frames before the end coordinate, so
+    # the window ENDS at the join rather than starting there. Here the
+    # audio and video windows are both 22 frames, so it starts exactly at
+    # frame 0; the 24-frame audio case below is the one that goes negative.
+    a_idx = aud[0]["resolved_frame_index"]
+    assert a_idx <= 0, a_idx
+    ref = {"ref_audio_t": aud[0]["audio_latent"].shape[-1],
+           "audio_latent": aud[0]["audio_latent"]}
     assert ref["ref_audio_t"] == 37, ref["ref_audio_t"]  # round(22/24*40)
     tail = ref["audio_latent"]
     assert tuple(tail.shape) == (1, 32, 2, 37), tail.shape
@@ -240,7 +282,7 @@ def main():
     # end coordinate is FRAME_RESCALE * end_frame and the target's audio
     # rows sit on integers, so a fractional end coordinate would place
     # the pinned content between them (a third of a step is 8.3 ms)
-    got_end = ref[nodes.MC_AUDIO_KEY]
+    got_end = a_idx + ref["ref_audio_t"] / nodes.FRAME_RESCALE
     end_coord = nodes.FRAME_RESCALE * got_end
     assert abs(end_coord - round(end_coord)) < 1e-9, end_coord
     assert abs(end_coord - 37.0) < 1e-9, end_coord
@@ -248,7 +290,7 @@ def main():
     # the pinned VIDEO must have come out of the latent too, not the VAE.
     # The fake VAE returns zeros, so any nonzero block proves the source,
     # and each block must equal the matching step of the source latent.
-    kf_blocks = [kf["latent"] for kf in kfs]
+    kf_blocks = [kf["latent"] for kf in vid]
     src = prev["samples"].parts[0].a
     start = latent_t - len(kf_blocks)          # 37 - 7 = 30, cycle pos 0
     assert start % 5 == 0, start
@@ -264,16 +306,36 @@ def main():
           "(bit-identical to the source steps), audio 37 steps, end_frame "
           "%.4f (overhang-compensated)" % (idx, got_end))
 
+    # the recommended config pins 22 frames of picture and 24 of sound, so
+    # the audio window reaches back past the start of the clip. That index
+    # is negative AND fractional, which no stock node can produce and
+    # nothing upstream tests, so it is worth asserting here as well as in
+    # the layout contract.
+    run(conditioning=[["c", {}]], vae=VAE(), latent=target,
+        context_frames=context, context_length="22",
+        audio_context_length=24, context_latent=prev)
+    wide = audio_kf()
+    assert wide["audio_latent"].shape[-1] == 40, wide["audio_latent"].shape
+    w_idx = wide["resolved_frame_index"]
+    assert w_idx < 0 and w_idx != int(w_idx), w_idx
+    assert abs(w_idx - (37 - 40) / nodes.FRAME_RESCALE) < 1e-9, w_idx
+    w_end = nodes.FRAME_RESCALE * audio_end()
+    assert abs(w_end - round(w_end)) < 1e-9, w_end
+    print("wide audio window: 24 frames of sound against 22 of picture, "
+          "anchor index %.3f, still ending on the audio grid at %.1f"
+          % (w_idx, w_end))
+
     # no latent wired: the pixel path, same offsets, and the fake VAE
     # returns zeros so the blocks must now be zero rather than sliced.
     # No audio either, so node_helpers is never called: read the
     # conditioning the node returns rather than the capture hook
-    res, _ = node.apply(
+    res, _ = run(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22)
     px = res[0][1]["minimax_keyframes"]
-    assert [kf[nodes.MC_KEY] for kf in px] == idx, "offsets differ by source"
+    assert [kf["resolved_frame_index"] for kf in px] == idx, \
+        "offsets differ by source"
     assert float(px[0]["latent"].a.max()) == 0.0, "did not use the VAE"
     print("pixels path: same %d blocks at the same offsets, encoded rather "
           "than sliced" % len(px))
@@ -347,7 +409,7 @@ def main():
         T(np.zeros((1, 32, 2, audio_t), dtype=np.float32)),
     ])}
     try:
-        node.apply(
+        run(
             conditioning=[["c", {}]], vae=VAE(), latent=target,
             context_frames=context, context_length="22",
             audio_context_length=22, context_latent=small)
@@ -358,16 +420,18 @@ def main():
     else:
         raise AssertionError("mismatched latent did not refuse")
 
-    # nothing wired at all
-    try:
-        node.apply(
-            conditioning=[["c", {}]], vae=VAE(), latent=target,
-            context_length="22", audio_context_length=22)
-    except ValueError as e:
-        assert "nothing to pin" in str(e), str(e)
-        print("nothing wired: refused with a plain reason")
-    else:
-        raise AssertionError("no context at all did not refuse")
+    # nothing wired: first clip of a chain. Pass the conditioning
+    # through and report trim_frames 0 so Trim is a no-op.
+    cond = [["c", {"untouched": True}]]
+    res, trim = run(
+        conditioning=cond, vae=VAE(), latent=target,
+        context_length="22", audio_context_length=22)
+    assert trim == 0, trim
+    assert res is cond
+    assert captured.get("untouched") is True
+    assert "minimax_keyframes" not in captured
+    print("nothing wired: original conditioning passed through, "
+          "trim_frames 0")
 
     # the constants that replaced the widgets must be on the good values
     assert nodes.ENCODE_MODE == "video"
@@ -406,14 +470,13 @@ def main():
 
     audio = {"waveform": T(np.zeros((1, 2, 32000), dtype=np.float32)),
              "sample_rate": 32000}
-    node.apply(
+    run(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22, audio_vae=AudioVAE(), context_audio=audio)
-    ref2 = captured["minimax_refs"][0]
     # no overhang to compensate on this path, but the same grid rule
     # applies: 22 frames is 36.667 steps, which must snap to 37
-    end2 = nodes.FRAME_RESCALE * ref2[nodes.MC_AUDIO_KEY]
+    end2 = nodes.FRAME_RESCALE * audio_end()
     assert abs(end2 - 37.0) < 1e-9, end2
     print("vae path: window snapped to the audio grid, end coord %.1f" % end2)
 
@@ -475,13 +538,13 @@ def main():
                 T(np.arange(1 * 32 * 2 * at, dtype=np.float32
                             ).reshape(1, 32, 2, at)),
             ])}
-            node.apply(
+            run(
                 conditioning=[["c", {}]], vae=VAE(), latent=tgt,
                 context_frames=T(np.zeros((f, 480, 864, 3),
                                           dtype=np.float32)),
                 context_length="22", audio_context_length=22,
                 context_latent=src)
-            got = captured["minimax_refs"][0][nodes.MC_AUDIO_KEY]
+            got = audio_end()
             coord = nodes.FRAME_RESCALE * got
             assert abs(coord - round(coord)) < 1e-9, (f, coord)
             assert abs(coord - want_coord) < 1e-9, (f, coord, want_coord)
@@ -531,67 +594,68 @@ def main():
         {"kind": "audio", "ref_audio_t": 9},
     ]
     r2v_cond = [["c", {"minimax_refs": [dict(r) for r in existing]}]]
-    out_cond, _ = node.apply(
+    out_cond, _ = run(
         conditioning=r2v_cond, vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22, context_latent=prev)
     refs_out = captured["minimax_refs"]
-    assert len(refs_out) == 4, len(refs_out)
+    assert len(refs_out) == 3, len(refs_out)
     for got, want in zip(refs_out, existing):
         assert got["kind"] == want["kind"], (got, want)
-        assert got.get(nodes.MC_AUDIO_KEY) is None, got
-    assert refs_out[-1][nodes.MC_AUDIO_KEY] is not None
-    assert refs_out[-1]["ref_audio_t"] == 37
-    # the caller's own list must not have been mutated in place
-    assert len(r2v_cond[0][1]["minimax_refs"]) == 3
+    # the pinned audio is a keyframe now, so the graph's reference list is
+    # not touched at all. Its blocks still push the target origin along,
+    # and the anchors follow it, which is stock's arithmetic and not ours.
     assert captured["minimax_keyframes"], "keyframes lost on the R2V path"
-    print("R2V path: 3 incoming references preserved, motion context audio "
-          "appended as the 4th, keyframes intact")
+    assert audio_kf()["audio_latent"].shape[-1] == 37
+    assert len(r2v_cond[0][1]["minimax_refs"]) == 3
+    print("R2V path: 3 incoming references untouched, motion context audio "
+          "rides as a keyframe, keyframes intact")
 
     # last_frame passthrough: an fl2va graph's own anchors used to be
-    # replaced outright. The last-frame anchor must survive, tagged with
-    # MC_KEY so the layout patch compensates it alongside ours; the
-    # first-frame anchor sits inside the pinned head, which the pinned
-    # run already decides, so it is dropped with a warning.
+    # replaced outright. The last-frame anchor must survive untouched,
+    # because every keyframe now carries its real index and stock
+    # compensates them all the same way. The first-frame anchor sits
+    # inside the pinned head, which the pinned run already decides, so it
+    # is dropped with a warning.
     captured.clear()
     up_kf = [{"resolved_frame_index": 0, "latent": "FF"},
              {"resolved_frame_index": frames - 1, "latent": "LF"}]
-    fl_cond = [["c", {"minimax_keyframes": [dict(k) for k in up_kf],
-                      "minimax_frame_count": frames}]]
+    fl_cond = [["c", {"minimax_keyframes": [dict(k) for k in up_kf]}]]
     catcher2 = _Catcher()
     nodes._LOG.addHandler(catcher2)
     try:
-        node.apply(
+        run(
             conditioning=fl_cond, vae=VAE(), latent=target,
             context_frames=context, context_length="22",
             audio_context_length=22, context_latent=prev)
     finally:
         nodes._LOG.removeHandler(catcher2)
     merged = captured["minimax_keyframes"]
-    assert len(merged) == 1 + 7, len(merged)
+    # kept anchor + 7 pinned steps + the pinned audio keyframe
+    assert len(merged) == 1 + 7 + 1, len(merged)
     assert merged[0]["latent"] == "LF"
-    assert merged[0][nodes.MC_KEY] == frames - 1
     assert merged[0]["resolved_frame_index"] == frames - 1
-    assert [kf[nodes.MC_KEY] for kf in merged[1:]] == idx
+    assert merged[0] is not fl_cond[0][1]["minimax_keyframes"][1], \
+        "the caller's dict was passed through by reference"
+    assert [kf["resolved_frame_index"] for kf in merged[1:8]] == idx
     assert any("dropped 1 keyframe anchor" in m for m in catcher2.msgs), \
         catcher2.msgs
-    # the caller's dicts must not have been tagged in place
-    assert nodes.MC_KEY not in fl_cond[0][1]["minimax_keyframes"][1]
-    # keyframes resolved against a different clip length are a wiring
-    # error: the anchor would land at the wrong frame, so refuse
-    bad_cond = [["c", {"minimax_keyframes": [dict(up_kf[1])],
-                       "minimax_frame_count": frames + 17}]]
+    # an anchor past the end of this clip is a wiring error: the
+    # conditioning was resolved against a longer clip, so the anchor would
+    # land at the wrong frame. Refuse rather than render it.
+    bad_cond = [["c", {"minimax_keyframes": [
+        {"resolved_frame_index": frames + 17, "latent": "LF"}]}]]
     try:
-        node.apply(conditioning=bad_cond, vae=VAE(), latent=target,
+        run(conditioning=bad_cond, vae=VAE(), latent=target,
                    context_frames=context, context_length="22",
                    audio_context_length=22, context_latent=prev)
     except ValueError as e:
-        assert "resolved for a" in str(e), str(e)
+        assert "only %d frames" % frames in str(e), str(e)
     else:
-        raise AssertionError("frame-count mismatch did not refuse")
-    print("last_frame path: upstream last-frame anchor kept and tagged, "
-          "first-frame anchor dropped from the pinned head, frame-count "
-          "mismatch refused")
+        raise AssertionError("out-of-range anchor did not refuse")
+    print("last_frame path: upstream last-frame anchor kept unmodified, "
+          "first-frame anchor dropped from the pinned head, out-of-range "
+          "anchor refused")
 
     # save -> load -> context_latent roundtrip across "runs"
     import time
@@ -605,24 +669,26 @@ def main():
     ])}
     (p2,) = saver.save(prev2, "h3_context/clip")
     assert p1 != p2
-    (loaded,) = loader.load("h3_context")  # folder -> newest = p2
+    (loaded,) = loader.load(p2, clip_index=1)  # specific file
     parts = loaded["samples"]
     assert isinstance(parts, list) and len(parts) == 2
     captured.clear()
-    node.apply(
+    run(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22, context_latent=loaded)
-    ref3 = captured["minimax_refs"][0]
+    kf3 = audio_kf()
     want = float(prev2["samples"].parts[1].a[0, 0, 0, -1])
-    got = float(ref3["audio_latent"].a[0, 0, 0, -1])
-    assert got == want, (got, want)  # newest save's content came through
-    assert abs(ref3[nodes.MC_AUDIO_KEY] - 22.2) < 1e-6
-    ic1 = loader.IS_CHANGED("h3_context")
+    got = float(kf3["audio_latent"].a[0, 0, 0, -1])
+    assert got == want, (got, want)
+    assert abs(audio_end() - 22.2) < 1e-6
+    ic1 = loader.IS_CHANGED(p2, clip_index=1)
     assert isinstance(ic1, str) and p2 in ic1  # cache keys on the real file
-    print("save/load roundtrip: newest of 2 saves loaded, pinned, "
-          "end_frame %.4f, cache key tracks the file" %
-          ref3[nodes.MC_AUDIO_KEY])
+    assert loader.IS_CHANGED("h3_context", clip_index=0) == "disabled"
+    (empty,) = loader.load("h3_context", clip_index=0)
+    assert empty is None
+    print("save/load roundtrip: file loaded, pinned, end_frame %.4f, "
+          "index 0 is first-clip/no-context" % audio_end())
 
     # retry safety with indexed slots: generating clip 3, re-rolling it
     # must overwrite slot 3 and always load slot 2, never its own save
@@ -646,9 +712,9 @@ def main():
     (l3,) = loader.load("h3_context", clip_index=2)
     got = float(l3["samples"][1].a[0, 0, 0, 0])
     assert got == 7.0, got  # clip 2's latent, NOT the rejected attempt (8/9)
-    # newest-file mode would have returned the reject: prove the hazard
+    # index 0 is first-clip/no-context: it must not pick up the reject
     (lnew,) = loader.load("h3_context", clip_index=0)
-    assert float(lnew["samples"][1].a[0, 0, 0, 0]) == 9.0
+    assert lnew is None
     # asking for a slot that was never saved says so plainly
     try:
         loader.load("h3_context", clip_index=7)

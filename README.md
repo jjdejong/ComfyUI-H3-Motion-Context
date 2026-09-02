@@ -102,10 +102,14 @@ clip B. B picks up where A left off: same motion, same speed, same
 direction, and the same audio continued rather than a new take that
 sounds similar. Repeat as long as you like.
 
-Nothing on disk is edited. The nodes patch ComfyUI at runtime, and the
-patches check their own math against the live ComfyUI code every time you
-start. If an update breaks an assumption, the nodes refuse to run and say
-why. A loud failure beats a bad render you don't notice.
+Nothing on disk is edited and nothing in ComfyUI is modified. The nodes
+check their arithmetic against the live ComfyUI code before the first
+render, and if an update breaks an assumption they refuse to run and say
+what moved. A loud failure beats a bad render you don't notice.
+
+Requires ComfyUI 0.34.0 or newer, which is where H3 gained arbitrary
+keyframe anchors. Version 0.3.1 runs on that and on everything older;
+see [CHANGELOG.md](CHANGELOG.md).
 
 ### Global and tile prompts
 
@@ -147,27 +151,31 @@ above instead of adding a wrapper node per tile.
 
 ## Why this exists
 
-LTX has clip chaining built in. H3 doesn't, but the parts were already
-there. H3 can pin a frame at a time coordinate and re-inject it at every
-sampling step. The only thing stopping a whole run of frames was one
-check in ComfyUI that rejected any pinned frame other than the first or
-last. The math already worked for everything in between. This lifts that
-check.
+ComfyUI can anchor a still or a short clip at any frame of an H3
+generation, with the Add Guide for MiniMax H3 node. If that is all you
+need, use it. You do not need this pack for it.
 
-ComfyUI 0.33 lifted it upstream too, and added an Add Guide for MiniMax H3
-node that anchors an image, a short clip or audio at any frame. If that is
-all you need, use it. You do not need this pack for it.
+Chaining is a different problem, and two parts of it are still unsolved
+by anything else.
 
-What is still here: the previous clip's tail is sliced straight out of its
-latent, with no decode, no resize and no re-encode, which is where the
-colour drift and softening down a long chain come from. And the pinned
-audio window ENDS at the join and reaches backwards, so the model
-continues your soundtrack rather than starting something that sounds like
-it. Add Guide anchors audio forwards from the anchor frame, which is a
-different thing and audibly so on anything with a beat.
+**The picture goes out to pixels and back at every link.** Add Guide takes
+images and encodes them. Chain through it and every join costs a decode, a
+resize and a re-encode. That round trip is where the colour drift and the
+softening down a long chain come from. This pack slices the previous
+clip's tail straight out of its latent, so the pinned frames are the same
+numbers they were, bit for bit.
 
-The pack runs on 0.32 and 0.33 and produces identical coordinates on
-either, so a graph renders the same across the update.
+**The sound restarts instead of continuing.** Add Guide anchors audio
+starting at a frame and running forward. To actually continue a
+soundtrack, the pinned window has to END at the join and reach backwards
+into the sound that already played. That is the difference between the
+model continuing your track and the model writing something that sounds
+like it, and on anything with a beat you hear it immediately.
+
+Everything else here follows from those two: the Trim node that removes
+the pinned head from the delivery, the Save/Load Latent pair that carries
+a clip across without touching pixels, and the Seam Probe that measures
+whether a join is a real continuation or a convincing imitation.
 
 Audio was the harder half, and it's the more useful half, since H3
 generates picture and sound together. See "Why the audio needed work"
@@ -179,25 +187,24 @@ Drop the folder in `ComfyUI/custom_nodes/` and restart. At startup you'll
 just see:
 
 ```
-h3_motion_context: nodes registered. ComfyUI patches install on the first
-run of a Motion Context node.
+h3_motion_context: nodes registered. ComfyUI is not modified; the layout
+checks run on the first use of a Motion Context node.
 ```
 
-The patches don't go in until you actually run one. Having the pack
-installed changes nothing about your other H3 workflows. The first time
-you chain a clip you'll see:
+Having the pack installed changes nothing about your other H3 workflows,
+and nothing runs until you actually chain a clip. The first time you do,
+you'll see:
 
 ```
-h3_motion_context: interior keyframe anchors enabled (ComfyUI 0.33 or newer, stock places anchors itself)
-h3_motion_context: keyframe/ref coexistence enabled
+h3_motion_context: ComfyUI H3 layout checks passed, anchors and pinned audio will land where intended
 ```
-
-On ComfyUI 0.32 or older the first line ends `(ComfyUI 0.32 or older,
-stock rejects interior anchors)` instead. The patch reads the layout
-constructor's signature to work out which it is looking at, so a fork
-reporting an odd version number still gets the right answer.
 
 Anything else and the node refuses to run. The reason is logged.
+
+On ComfyUI 0.33.4 or older the node says so and points you at version
+0.3.1, which runs on both. That is read from the layout code itself
+rather than a version number, so a nightly or a fork gets the right
+answer.
 
 ## Wiring
 
@@ -229,21 +236,44 @@ next run:   H3 Motion Context Load Latent -> context_latent
 ```
 
 Both have a `clip_index` and the numbers mean what they say. On Load, the
-clip you're continuing FROM. On Save, the clip this one IS. Making clip 2
-from clip 1: Load 1, Save 2. Don't like it? Queue again, change nothing.
-The retry reloads clip 1 and overwrites clip 2. Happy with it? Bump both
-numbers and move on. Files are named the obvious way,
-`clip_00002.safetensors` is clip 2.
+clip you're continuing FROM. On Save, the clip this one IS. First clip:
+Load 0, Save 1. Making clip 2 from clip 1: Load 1, Save 2.
 
-Leave context unwired for clip 1.
+Load 0 does not read a file. Motion Context then passes the incoming
+conditioning through and reports `trim_frames` 0, so you can leave the
+node enabled for the first clip. Do not mute it.
 
-At `clip_index` 0 the loader grabs the newest file in the folder instead.
-Simpler, but a re-roll then loads its own rejected audio, so don't use it
-for anything you're going to retry. Auto-saved files get a trailing
-underscore (`clip_00002_.safetensors`) because they're numbered by run,
-not by clip, and indexed loading skips them on purpose.
+Do not use queue **run on change** to walk the chain. Each index change is
+a separate graph edit, so two widgets incrementing will queue two runs and
+skip slots. Use **H3 Motion Context Chain** instead of ComfyUI's Run
+button.
 
-You can also point the loader at a specific file, which ignores the index.
+**The Chain node only sees Load and Save if all three sit in the same
+canvas group** (one of those coloured boxes you draw around nodes). If
+they are not grouped together, every button does nothing. Select Load,
+Save, and Chain, then Group Selected (or drop Chain into the existing
+Motion Context group).
+
+- **Run/Re-roll** is the Run button for this graph. It queues at the
+  current Load/Save indices and does not advance them. First clip: leave
+  Load 0 / Save 1 and click it. Hate the result? Click it again; the
+  retry overwrites that slot.
+- **Approve** advances both indices, then queues the next clip once.
+- **Chain** queues at the current Load/Save indices and auto-approves
+  after each successful run. It does not reset the pair first, so you
+  can walk a few clips by hand and then let it take over. Click **Stop**
+  (the same button) to halt the next queue.
+- **Reset** sets Load 0 / Save 1. It does not queue.
+
+Files are named the obvious way, `clip_00002.safetensors` is clip 2.
+
+Auto-saved files (Save at 0) get a trailing underscore
+(`clip_00002_.safetensors`) because they're numbered by run, not by clip,
+and indexed loading skips them on purpose.
+
+You can also point the loader at a specific file when `clip_index` is
+greater than 0; the file is loaded and the index is ignored. Index 0
+never reads a file.
 Its output is only for `context_latent`. Don't wire it into a decode node.
 Stock Save/Load Latent won't work here, it can't handle H3's paired
 video/audio latent.
@@ -267,23 +297,36 @@ Use the latent unless you have a reason not to.
 
 ### Reference mode
 
-A Ref2VA graph carries its own reference blocks (image, video, video with
-audio, audio) and chaining needs one too, for the pinned sound. They share
-one list. Put this node after `MiniMaxH3ReferenceToVideo` and wire it as
-above. Your references are kept and the continuation audio is added to
-them.
+Put this node after `MiniMaxH3ReferenceToVideo` and wire it as above. Your
+reference blocks (image, video, video with audio, audio) are left alone
+entirely: the pinned sound rides as a keyframe, not a reference, so the
+two mechanisms no longer share a list.
 
-Nothing to configure. Worth mentioning only because older versions
+Nothing to configure. Worth mentioning only because versions before 0.2.0
 overwrote that list, so turning chaining on quietly threw your references
-away.
+away, and because up to 0.3.1 the pinned audio was added to it.
+
+References still push the target timeline along, and the pinned frames
+follow it. That is ComfyUI's own arithmetic now rather than this pack's.
+
+### Alongside Add Guide
+
+Anchor whatever you like with Add Guide for MiniMax H3 and put this node
+after it. Both survive: the pinned head decides how the clip starts, the
+guide decides what happens where you put it. Guides that carry audio keep
+their own placement, which is forward from the anchor frame, while the
+pinned sound keeps its backwards-reaching window.
+
+Guides anchored inside the pinned head are dropped with a warning, for
+the same reason a `first_frame` anchor is.
 
 ### Keeping a last-frame target
 
 Wire `last_frame` on the stock conditioning node as usual and put this
 node after it. The anchor is kept and pinned alongside the head: the
 pinned run decides how the clip starts, your image decides where it
-ends. Its coordinates get the same layout compensation as the pinned
-frames, so it stays put when references are in the graph.
+ends. It keeps the coordinates ComfyUI gave it, including the shift
+references apply, so it stays put whatever else is in the graph.
 
 A `first_frame` anchor is dropped, with a warning. The pinned head owns
 those frames, and a second block pinned at the same instant with
@@ -430,13 +473,19 @@ through the latent path, where nothing hides a seam. One Windows machine,
 one resolution, one sampler. The math self-tests every startup. The
 perceptual results are one person's renders.
 
-**ComfyUI's H3 support is young.** These patches depend on the current
-shape of it. They check their assumptions at startup and shut down if
-something moved, so the failure mode after an update is "the node won't
-run," not bad output. ComfyUI 0.33 is the worked example: it changed the
-layout constructor, and 0.3.0 of this pack refused to run until 0.3.1
-caught up. Annoying, but the alternative was joins landing at the wrong
-instant with nothing to tell you.
+**ComfyUI's H3 support is young.** This pack no longer patches any of it,
+but it still depends on how the layout places things, and one of those
+dependencies has no upstream test behind it: the pinned audio window is
+positioned with a fractional, negative anchor index. That is legal
+arithmetic in the layout and no stock node can produce one, so nothing
+upstream exercises it. `layout_contract.py` checks it before the first
+render and refuses if it ever stops holding.
+
+The failure mode after a ComfyUI update is therefore "the node won't
+run," not bad output. There is a worked example: when the layout
+constructor changed, 0.3.0 of this pack refused until 0.3.1 caught up.
+Annoying, but the alternative was joins landing at the wrong instant with
+nothing to tell you.
 
 **License.** The H3 community license reportedly doesn't currently cover
 the EU, UK, Korea or the US. Check for yourself before shipping anything
@@ -451,19 +500,18 @@ that config.
 
 ## Testing
 
-Seven scripts, all runnable without ComfyUI or a GPU.
+Six scripts, all runnable without ComfyUI or a GPU.
 
 ```
-python tests/_mock_harness.py        # patch logic against a fake stock model
+python tests/_mock_harness.py        # the layout checks against a fake stock model
 python tests/_node_smoke_test.py     # the node end to end, refs + save/load
-python tests/_payload_gate_test.py   # unrelated H3 graphs come out unchanged
 python tests/_probe_node_test.py     # the seam probe node, joins with known answers
 python tests/seam_probe.py A.flac B_untrimmed.flac    # is the join real continuation?
 python tests/level_step.py clip*.flac                 # does the level or room tone jump?
 python tests/freeze_detect.py clip*.mp4               # did a held shot render as a still?
 ```
 
-The first four print their checks and end with a pass line. The other
+The first three print their checks and end with a pass line. The other
 three measure real output; `level_step` and `freeze_detect` take
 `--self-test` to check their own math on made-up data first, and
 `seam_probe`'s math is what `_probe_node_test.py` exercises.
@@ -510,16 +558,16 @@ workflow saved against an older version will load its numbers into the
 wrong slots. Delete the Motion Context node, add it again and rewire it.
 Takes a minute and beats rendering with scrambled settings.
 
-**Only install this once**, and don't run it alongside another pack that
-does the same job. Several H3 packs lift the same first/last keyframe
-restriction independently, and only one of them can own that code. If
-another one got there first this node says so and refuses, rather than
-wrapping their patch and producing joins neither pack intended. Disable
-one and restart.
+**Only install this once.** A fork of this repo, a manual clone next to a
+Manager install, or a renamed backup still sitting in `custom_nodes` will
+all load. Renaming a folder does not stop ComfyUI loading it.
 
-The same goes for a fork of this repo, a manual clone next to a Manager
-install, or a renamed backup still sitting in `custom_nodes`. Renaming a
-folder does not stop ComfyUI loading it.
+Older versions of this pack, and other H3 packs, patch ComfyUI's layout
+code at runtime. This one does not, so it no longer competes for that
+code and will run alongside them. If it finds the layout wrapped it says
+who by, then checks whether anchors still land correctly and carries on
+if they do. Keeping one H3 chaining pack installed is still the quiet
+life.
 
 ## Credits
 
@@ -535,6 +583,10 @@ timecode budget are all that build's findings. Same run measured a
 video-only chain at a median seam level step of 0.905, dropping to 0.16
 with the audio carried across.
 
+**javawock7618** and **azra1l** reported the layout change that broke
+0.3.0 and narrowed it to specific commits, which turned a hunt into a
+diff. **ChimeraWerks** found and fixed the audio grid overhang.
+
 If you build something long with this, numbers are more useful than praise.
 Open an issue.
 
@@ -542,12 +594,11 @@ Open an issue.
 
 | File | Role |
 |---|---|
-| `patch_layout.py` | Places pinned frames at their real time coordinates, moves pinned audio onto the clip's timeline, keeps everything lined up when references shift the layout. Also lifts the first/last-only restriction on ComfyUI 0.32 and older, where stock still enforces it. Self-tests before it installs. |
-| `patch_payload.py` | Lets pinned video and pinned audio coexist. Stock code let one overwrite the other. Only applies to graphs using this pack. |
+| `layout_contract.py` | Proves ComfyUI still places anchors and pinned audio where this pack needs them, once, before the first render. Modifies nothing. |
 | `nodes.py` | The four core nodes: Motion Context, Trim, and the latent Save/Load pair. |
 | `probe_node.py` | The Seam Probe node: measures a join in-graph, with the seam at a known sample instead of inferred from file ends. |
 | `tests/seam_probe.py` | Is a join's audio a real continuation, a sound-alike, or drifting. |
 | `tests/level_step.py` | Level and room-tone continuity at each join. Also catches sample-rate mismatches. |
 | `tests/freeze_detect.py` | Stretches where the picture stops moving. |
-| `tests/_mock_harness.py`, `tests/_node_smoke_test.py`, `tests/_payload_gate_test.py`, `tests/_probe_node_test.py` | Patch and node tests, numpy only. |
+| `tests/_mock_harness.py`, `tests/_node_smoke_test.py`, `tests/_probe_node_test.py` | Layout, node and probe tests, numpy only. |
 | `CHANGELOG.md` | What changed in each release, and which ComfyUI H3 layout it works with. |

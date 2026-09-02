@@ -29,6 +29,7 @@ anchor_mode
           what this mode is asking.
 """
 
+import gc
 import logging
 import os
 
@@ -42,16 +43,8 @@ try:
 except ImportError:  # ComfyUI always ships safetensors; belt and braces
     _st_load = _st_save = None
 
-from .patch_layout import (
-    MC_KEY,
-    MC_AUDIO_KEY,
-    apply_patch as _apply_layout_patch,
-    is_applied as _layout_patch_applied,
-)
-from .patch_payload import (
-    apply_patch as _apply_payload_patch,
-    is_applied as _payload_patch_applied,
-)
+from .layout_contract import ensure as _ensure_layout_contract
+from .layout_contract import is_checked as _layout_checked
 
 try:
     import torchaudio
@@ -61,42 +54,20 @@ except ImportError:
 _LOG = logging.getLogger("h3_motion_context")
 
 
-def _ensure_layout_patch():
-    """Install the layout patch, once, the first time a node runs.
+def _ensure_layout_ok():
+    """Prove ComfyUI still places anchors the way this pack needs, once.
 
-    ComfyUI imports every folder in custom_nodes at startup, so patching
-    at import time would put this pack's wrappers in the path of every H3
-    graph on the machine, including graphs that never go near these
-    nodes. Installing on first use instead means the pack sitting in
-    custom_nodes changes nothing at all until you actually chain a clip.
+    This used to install two runtime patches. ComfyUI 0.33 does natively
+    what they existed to do, so the node now builds plain keyframe dicts
+    and only has to check that the arithmetic behind them still holds. See
+    layout_contract.py for what is checked and why it is not free.
 
-    The cost is that a self-test failure shows up on the first render
-    rather than in the startup log. The message is the same either way,
-    and it still refuses rather than rendering something wrong.
+    Run on first use rather than at import, same as the patches were: the
+    pack sitting in custom_nodes should change nothing at all until you
+    actually chain a clip. The cost is that a failure shows up on the
+    first render instead of in the startup log.
     """
-    if _layout_patch_applied():
-        return
-    if not _apply_layout_patch():
-        raise RuntimeError(
-            "h3_motion_context: the layout patch could not be applied, so "
-            "interior anchors would be rejected by ComfyUI. The reason was "
-            "logged just above this error.")
-
-
-def _ensure_payload_patch():
-    """Install the payload patch, once, before anything needs it.
-
-    Only reached when audio is being pinned, which is the only case where
-    a ref and the keyframes have to coexist.
-    """
-    if _payload_patch_applied():
-        return
-    if not _apply_payload_patch():
-        raise RuntimeError(
-            "h3_motion_context: the payload patch could not be applied. "
-            "Without it the audio ref would overwrite the pinned video "
-            "latents and the motion context would be lost. The reason was "
-            "logged just above this error.")
+    _ensure_layout_contract("pinning a clip")
 
 
 FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
@@ -297,7 +268,7 @@ def _audio_tail_from_latent(latent, a_frames):
     lands on .0, .333 or .667 and never on .5, so there are exactly three
     cases:
 
-        frames % 3 == 0   124 -> n/a          exact, overhang  0
+        frames % 3 == 0   243 wants 405.00, allocates 405, overhang    0
         frames % 3 == 1   124 wants 206.67, allocates 207, overhang +1/3
         frames % 3 == 2   260 wants 433.33, allocates 433, overhang -1/3
 
@@ -415,10 +386,12 @@ class MiniMaxH3MotionContext:
     def apply(self, conditioning, vae, latent, context_length,
               audio_context_length=24, context_frames=None,
               context_latent=None, audio_vae=None, context_audio=None):
+        if context_latent is None and context_frames is None:
+            return (conditioning, 0)
         encode_mode, anchor_mode = ENCODE_MODE, ANCHOR_MODE
         audio_mode, crop = AUDIO_MODE, CROP
         context_length = int(context_length)
-        _ensure_layout_patch()
+        _ensure_layout_ok()
 
         video = _video_from_latent(latent)
         latent_t = int(video.shape[2])
@@ -459,10 +432,6 @@ class MiniMaxH3MotionContext:
             available = _pixel_frames(int(src_video.shape[2]))
             video_src = "latent"
         else:
-            if context_frames is None:
-                raise ValueError(
-                    "h3_motion_context: nothing to pin. Wire context_latent "
-                    "(preferred) or context_frames.")
             available = int(context_frames.shape[0])
             video_src = "pixels"
 
@@ -545,20 +514,27 @@ class MiniMaxH3MotionContext:
 
         keyframes = []
         for p, blk in zip(indices, blocks):
+            # Straight to stock. `resolved_frame_index` is the real pixel
+            # frame the block sits at, which ComfyUI 0.33 accepts for any
+            # value, so there is nothing to smuggle and nothing to rewrite
+            # afterwards. One keyframe per latent step rather than a single
+            # multi-step block: `indices` already carries each step's real
+            # offset, which keeps the encode_mode=frames path (offsets
+            # 0..n-1, one still each) on exactly the same code. Stock lays
+            # a 1-step latent at cursor + FRAME_RESCALE * index either way,
+            # so the two forms produce identical rows.
             keyframes.append({
-                # stock code accepts only 0 or frame_count-1 here; the real
-                # position rides under MC_KEY and the layout patch applies it
-                "resolved_frame_index": 0,
-                MC_KEY: p,
+                "resolved_frame_index": p,
                 "latent": blk,
             })
 
         ref_audio_t = 0
         audio_ref = None
+        audio_kf = None
+        audio_end_frame = None
         a_frames = 0
         audio_src = "off"
         if context_latent is not None or context_audio is not None:
-            _ensure_payload_patch()
             # the audio window is independent of the video one: audio cond
             # rows cost rows but never cost delivered frames
             a_frames = int(audio_context_length) or span
@@ -580,22 +556,17 @@ class MiniMaxH3MotionContext:
                     audio_vae, context_audio, a_frames / float(FPS))
                 overhang = 0.0  # decoded audio was match_tail-cut at the frame
                 audio_src = "vae"
-            ref = {
-                "kind": "audio",
-                "ref_audio_t": ref_audio_t,
-                "audio_latent": audio_latent,
-            }
             if audio_mode == "timeline":
                 # end-align the audio window with the pinned video: both are
                 # the tail of clip A, so both must end at the same instant
-                # of the new timeline -- frame `span` in head mode (where
+                # of the new timeline, frame `span` in head mode (where
                 # A's last frame sits), frame 0 in before mode. On the
                 # latent path the sliced content overshoots A's last
                 # frame by `overhang` of a step, signed, because H3
                 # rounds its audio grid to the nearest step and so falls
                 # short as often as it reaches past. The end coordinate
-                # moves by exactly that much; the layout patch takes a
-                # fractional frame index.
+                # moves by exactly that much, and a keyframe index is a
+                # plain multiplier so it takes a fractional frame.
                 end_frame = float(span if anchor_mode == "head" else 0)
                 end_frame += overhang / FRAME_RESCALE
                 # then snap the window onto the target's own audio grid.
@@ -613,51 +584,68 @@ class MiniMaxH3MotionContext:
                 # the same grid as the sound being generated from it.
                 end_coord = round(FRAME_RESCALE * end_frame)
                 end_frame = end_coord / FRAME_RESCALE
-                ref[MC_AUDIO_KEY] = end_frame
-            # APPEND rather than assign. Ref2VA conditioning already
-            # carries the graph's own image, video and audio reference
-            # blocks, and assigning minimax_refs outright would replace
-            # the lot. Applied as a second call so the keyframe values
-            # land first and this one only touches the reference list.
-            audio_ref = ref
+                # Stock places a keyframe's audio window STARTING at
+                # FRAME_RESCALE * index past the target origin and running
+                # forward. We need it to END at the join, so the index is
+                # the start of a window `ref_audio_t` steps wide:
+                #
+                #   start coord = FRAME_RESCALE * end_frame - ref_audio_t
+                #   index       = end_frame - ref_audio_t / FRAME_RESCALE
+                #
+                # which is fractional, and negative whenever the window is
+                # longer than the pinned head, which it normally is. Both
+                # are legal arithmetic in the layout and neither is
+                # reachable through the stock Add Guide node, so
+                # layout_contract checks them before the first render.
+                audio_kf = {
+                    "resolved_frame_index": (end_frame
+                                             - ref_audio_t / FRAME_RESCALE),
+                    "audio_latent": audio_latent,
+                }
+                audio_end_frame = end_frame
+            else:
+                # stock reference placement: the window sits in its own
+                # span ahead of the target, which is what makes the model
+                # imitate the sound rather than continue it. Kept as the
+                # comparison the timeline mode is measured against.
+                audio_ref = {
+                    "kind": "audio",
+                    "ref_audio_t": ref_audio_t,
+                    "audio_latent": audio_latent,
+                }
 
         # MERGE with any keyframes already on the conditioning instead of
-        # replacing them. A last_frame anchor from the upstream node is a
-        # legitimate companion to a chained head: the pinned run decides
-        # how the clip starts, the anchor decides where it ends. Each kept
-        # keyframe is tagged with its own position under MC_KEY so the
-        # layout patch gives it the same reference compensation as ours;
-        # untagged it would either trip the mixed-keyframe guard (with
-        # audio) or sit uncompensated next to compensated anchors (without).
-        # At p = frame_count-1 the patch reproduces stock's coordinate bit
-        # for bit, so tagging changes nothing when no reference is present.
+        # replacing them. A last_frame anchor from the upstream node, or an
+        # Add Guide anchor, is a legitimate companion to a chained head: the
+        # pinned run decides how the clip starts, the anchor decides where
+        # it ends. They need no special handling now that every keyframe
+        # carries its real index, ours included, and stock compensates all
+        # of them for references the same way.
+        #
         # Anchors inside the pinned head are dropped: the pinned run
         # already decides those frames, and a second cond block at the
         # same coordinate would fight it.
         head_end = span if anchor_mode == "head" else 0
+        tail_kfs = [audio_kf] if audio_kf is not None else []
         out = []
         dropped = []
         for emb, extra in conditioning:
             d = extra.copy()
             prior = d.get("minimax_keyframes") or []
-            pfc = d.get("minimax_frame_count")
-            if prior and pfc is not None and int(pfc) != frame_count:
-                raise ValueError(
-                    "h3_motion_context: the conditioning carries keyframes "
-                    "resolved for a %d frame clip, but the latent is %d "
-                    "frames. Wire the conditioning and the latent from the "
-                    "same node." % (int(pfc), frame_count))
             kept = []
             for kf in prior:
-                p = int(kf.get(MC_KEY, kf.get("resolved_frame_index", 0)))
+                p = kf.get("resolved_frame_index", 0)
+                if p >= frame_count:
+                    raise ValueError(
+                        "h3_motion_context: the conditioning carries a "
+                        "keyframe anchored at frame %s, but this clip is "
+                        "only %d frames. Wire the conditioning and the "
+                        "latent from the same node." % (p, frame_count))
                 if p < head_end:
                     dropped.append(p)
                     continue
-                kf = dict(kf)
-                kf[MC_KEY] = p
-                kept.append(kf)
-            d["minimax_keyframes"] = kept + keyframes
-            d["minimax_frame_count"] = frame_count
+                kept.append(dict(kf))
+            d["minimax_keyframes"] = kept + keyframes + tail_kfs
             out.append([emb, d])
         if dropped:
             _LOG.warning(
@@ -677,9 +665,9 @@ class MiniMaxH3MotionContext:
                   indices[0], indices[-1], frame_count, width, height, trim,
                   ("%d frames -> %d latent steps (%.3fs) from %s, %s"
                    % (a_frames, ref_audio_t, ref_audio_t / AUDIO_HZ, audio_src,
-                      "on the timeline ending at frame %.3f"
-                      % float(ref.get(MC_AUDIO_KEY))
-                      if audio_mode == "timeline" else "stock ref placement"))
+                      "on the timeline ending at frame %.3f" % audio_end_frame
+                      if audio_end_frame is not None
+                      else "stock ref placement"))
                   if ref_audio_t else "off")
         return (out, trim)
 
@@ -705,7 +693,7 @@ class MiniMaxH3MotionContextTrim:
     NEAREST step, which means a clip ships either about 8.3 ms more sound
     than picture or about 8.3 ms less, depending on its length:
 
-        frames % 3 == 0   exact
+        frames % 3 == 0   243 wants 405.00 steps, gets 405, exact
         frames % 3 == 1   124 wants 206.67 steps, gets 207, sound is long
         frames % 3 == 2   260 wants 433.33 steps, gets 433, sound is short
 
@@ -825,17 +813,11 @@ def _resolve_latent_path(path, clip_index=0):
     """Turn the loader's path input into a concrete file.
 
     Accepts an absolute path, a path relative to ComfyUI's output folder,
-    or a directory (in either form). For a directory:
-
-      clip_index == 0   the NEWEST .safetensors inside is used. Simple,
-                        but NOT retry-safe: re-rolling a clip loads the
-                        rejected attempt's own save (see the node docs).
-                        Its run counter also numbers ATTEMPTS, not clips.
-      clip_index  > 0   exactly that clip's slot is loaded: clip 1 is
-                        *_00001.safetensors. Auto-mode files carry a
-                        trailing underscore (*_00001_.safetensors) and
-                        are never matched, because their numbers count
-                        runs and could hold a reject.
+    or a directory (in either form). For a directory, clip_index must be
+    a positive slot: clip 1 is *_00001.safetensors. Auto-mode files carry
+    a trailing underscore (*_00001_.safetensors) and are never matched,
+    because their numbers count runs and could hold a reject. clip_index 0
+    is handled by the Load node itself (no file, first clip).
     """
     p = (path or "").strip().strip('"').strip("'")
     if not p:
@@ -846,44 +828,62 @@ def _resolve_latent_path(path, clip_index=0):
             return c
         if os.path.isdir(c):
             idx = int(clip_index)
-            if idx > 0:
-                # indexed slots use the natural name: clip 2 lives in
-                # *_00002.safetensors. Auto-mode files carry a trailing
-                # underscore (*_00002_.safetensors) and are deliberately
-                # NOT matched: their numbers count runs, not clips, so a
-                # reject could be sitting in any of them.
-                endings = ("_%05d.safetensors" % idx,
-                           "_clip%03d.safetensors" % idx)  # older versions
-                files = [os.path.join(c, f) for f in os.listdir(c)
-                         if f.endswith(endings)]
-                if not files:
-                    near = [f for f in os.listdir(c)
-                            if f.endswith("_%05d_.safetensors" % idx)]
-                    hint = ""
-                    if near:
-                        hint = (" Found %s, which is an auto-numbered save "
-                                "(trailing underscore = numbered by RUN, so "
-                                "it may be a reject). If it really is clip "
-                                "%d, rename it to drop the trailing "
-                                "underscore: %s" %
-                                (near[0], idx,
-                                 near[0].replace("_%05d_" % idx,
-                                                 "_%05d" % idx)))
-                    raise FileNotFoundError(
-                        "h3_motion_context: no saved latent for clip %d "
-                        "(no *_%05d.safetensors in %s).%s"
-                        % (idx, idx, c, hint))
-            else:
-                files = [os.path.join(c, f) for f in os.listdir(c)
-                         if f.endswith(".safetensors")]
-                if not files:
-                    raise FileNotFoundError(
-                        "h3_motion_context: no saved latents in %s. Run a "
-                        "clip with the Save Latent node first." % c)
+            if idx <= 0:
+                raise FileNotFoundError(
+                    "h3_motion_context: clip_index 0 does not load a file.")
+            # indexed slots use the natural name: clip 2 lives in
+            # *_00002.safetensors. Auto-mode files carry a trailing
+            # underscore (*_00002_.safetensors) and are deliberately
+            # NOT matched: their numbers count runs, not clips, so a
+            # reject could be sitting in any of them.
+            endings = ("_%05d.safetensors" % idx,
+                       "_clip%03d.safetensors" % idx)  # older versions
+            files = [os.path.join(c, f) for f in os.listdir(c)
+                     if f.endswith(endings)]
+            if not files:
+                near = [f for f in os.listdir(c)
+                        if f.endswith("_%05d_.safetensors" % idx)]
+                hint = ""
+                if near:
+                    hint = (" Found %s, which is an auto-numbered save "
+                            "(trailing underscore = numbered by RUN, so "
+                            "it may be a reject). If it really is clip "
+                            "%d, rename it to drop the trailing "
+                            "underscore: %s" %
+                            (near[0], idx,
+                             near[0].replace("_%05d_" % idx,
+                                             "_%05d" % idx)))
+                raise FileNotFoundError(
+                    "h3_motion_context: no saved latent for clip %d "
+                    "(no *_%05d.safetensors in %s).%s"
+                    % (idx, idx, c, hint))
             return max(files, key=os.path.getmtime)
     raise FileNotFoundError(
         "h3_motion_context: %r is neither a file nor a folder (also tried "
         "relative to the ComfyUI output directory)." % p)
+
+
+def _write_safetensors(path, tensors, metadata=None):
+    # safetensors load_file memory-maps on Windows. Overwriting a mapped
+    # slot (re-roll, or Load 0 aimed at the file Save is about to replace)
+    # fails with os error 1224. Write a sibling temp file and replace.
+    tmp = path + ".tmp"
+    try:
+        save_metadata = {"format": "h3_motion_context_av_v1"}
+        if metadata:
+            save_metadata.update({str(key): str(value)
+                                  for key, value in metadata.items()})
+        _st_save(tensors, tmp, metadata=save_metadata)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            gc.collect()
+            os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 class MiniMaxH3MotionContextSaveLatent:
@@ -911,14 +911,15 @@ class MiniMaxH3MotionContextSaveLatent:
                                "folder so the Load node can always pick "
                                "the newest."}),
                 "clip_index": ("INT", {
-                    "default": 0, "min": 0, "max": 9999,
+                    "default": 1, "min": 0, "max": 9999, "step": 1,
                     "tooltip": "Which clip of the chain THIS is. Saves to "
                                "that clip's fixed slot, so a re-roll "
                                "overwrites its own reject instead of "
-                               "stacking new files. Generating clip 2: "
-                               "set 2 here and 1 on the Load node. 0 = "
-                               "old behaviour, a new numbered file every "
-                               "run (numbers count runs, not clips)."}),
+                               "stacking new files. First clip: 1 here "
+                               "and 0 on the Load node. Clip 2: 2 here "
+                               "and 1 on the Load node. 0 = old behaviour, "
+                               "a new numbered file every run (numbers "
+                               "count runs, not clips)."}),
             },
         }
 
@@ -955,12 +956,7 @@ class MiniMaxH3MotionContextSaveLatent:
         else:
             path = os.path.join(folder, "%s_%05d_.safetensors"
                                 % (filename, counter))
-        save_metadata = {"format": "h3_motion_context_av_v1"}
-        if metadata:
-            save_metadata.update({str(key): str(value)
-                                  for key, value in metadata.items()})
-        _st_save({"video": video, "audio": audio}, path,
-                 metadata=save_metadata)
+        _write_safetensors(path, {"video": video, "audio": audio}, metadata)
         _LOG.info("h3_motion_context: saved AV latent to %s (video %s, "
                   "audio %s)", path, tuple(video.shape), tuple(audio.shape))
         return (path,)
@@ -971,13 +967,15 @@ class MiniMaxH3MotionContextLoadLatent:
 
     clip_index means exactly what it says: set it to the clip you want to
     CONTINUE FROM, and that clip's slot is loaded. Generating clip 2 from
-    clip 1: Load node 1, Save node 2. Re-rolling clip 2 changes nothing --
-    it reloads slot 1 and overwrites slot 2's reject. Accept, then bump
-    both numbers.
+    clip 1: Load node 1, Save node 2. Use H3 Motion Context Chain to
+    advance the pair and queue: Approve walks forward, Run/Re-roll stays
+    on the current slot (use it instead of ComfyUI's Run), Chain keeps
+    going from the current indices, Reset sets Load 0 / Save 1. All three
+    nodes must sit in the same canvas group.
 
-    At 0 it loads the newest file in the folder instead. Simple, but NOT
-    retry-safe: a re-roll's newest file is the rejected attempt's own
-    save, so the retry gets conditioned on the audio you just rejected.
+    At 0 there is no previous clip: the loader returns nothing and Motion
+    Context passes the conditioning through. First clip of a chain is
+    Load 0 / Save 1, then Load 1 / Save 2, and so on.
 
     The output is ONLY for the Motion Context node's context_latent input.
     It is not a decodable latent -- do not wire it into VAE decode.
@@ -992,16 +990,16 @@ class MiniMaxH3MotionContextLoadLatent:
                     "tooltip": "A saved latent file, or a folder (relative "
                                "paths resolve against the ComfyUI output "
                                "directory). Pointing at a specific FILE "
-                               "always loads that file, ignoring "
-                               "clip_index."}),
+                               "always loads that file when clip_index "
+                               "is greater than 0, ignoring the index. "
+                               "clip_index 0 never reads a file."}),
                 "clip_index": ("INT", {
-                    "default": 0, "min": 0, "max": 9999,
+                    "default": 0, "min": 0, "max": 9999, "step": 1,
                     "tooltip": "The clip to CONTINUE FROM: that clip's "
-                               "slot is loaded. Generating clip 2 from "
-                               "clip 1: set 1 here and 2 on the Save "
-                               "node. 0 = newest file in the folder "
-                               "(NOT retry-safe: a re-roll loads its own "
-                               "rejected audio)."}),
+                               "slot is loaded. First clip: 0 here and 1 "
+                               "on the Save node (nothing is loaded). "
+                               "Clip 2 from clip 1: 1 here and 2 on the "
+                               "Save node."}),
             },
         }
 
@@ -1014,16 +1012,20 @@ class MiniMaxH3MotionContextLoadLatent:
     @classmethod
     def IS_CHANGED(cls, latent_path, clip_index=0):
         # the path string stays constant while the file behind it changes
-        # (newest save, or an overwritten slot), so cache on the resolved
-        # file identity instead -- otherwise ComfyUI would happily serve
-        # a stale latent forever
+        # (an overwritten slot), so cache on the resolved file identity
+        # instead -- otherwise ComfyUI would happily serve a stale latent
+        # forever. Index 0 never reads a file.
+        if int(clip_index) <= 0:
+            return "disabled"
         try:
             p = _resolve_latent_path(latent_path, clip_index)
-            return "%s:%d" % (p, os.stat(p).st_mtime_ns)
+            return "%s:%d:owned" % (p, os.stat(p).st_mtime_ns)
         except Exception:
             return float("NaN")  # unresolvable: never cache
 
     def load(self, latent_path, clip_index=0):
+        if int(clip_index) <= 0:
+            return (None,)
         if _st_load is None:
             raise RuntimeError("h3_motion_context: safetensors is not "
                                "available; cannot load latents.")
@@ -1034,11 +1036,42 @@ class MiniMaxH3MotionContextLoadLatent:
                 "h3_motion_context: %s is not an h3_motion_context latent "
                 "(missing video/audio streams). Was it saved by the stock "
                 "Save Latent node instead?" % path)
+        # copy off the mmap so a later Save can overwrite this slot on Windows
+        video = data.pop("video").contiguous().clone()
+        audio = data.pop("audio").contiguous().clone()
         _LOG.info("h3_motion_context: loaded AV latent from %s", path)
         # a plain list, not a NestedTensor: only this repo's context_latent
         # input accepts it, which is the point -- it cannot be mistaken
         # for a decodable latent without failing loudly downstream
-        return ({"samples": [data["video"], data["audio"]]},)
+        return ({"samples": [video, audio]},)
+
+
+class MiniMaxH3MotionContextChain:
+    """Approve, Run/Re-roll, auto-chain, or reset Load/Save clip_index.
+
+    Load, Save, and this node must sit in the same canvas group or the
+    buttons do nothing. Run-on-change fires once per widget, so two
+    incrementing indices queue two prompts and skip slots. This node
+    advances the pair, then queues once. Frontend-only; execute is a no-op.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "noop"
+    OUTPUT_NODE = True
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = ("Approve advances Load/Save and runs the next clip. "
+                   "Run/Re-roll queues the current slot (use this instead "
+                   "of ComfyUI's Run). Chain queues the current slot and "
+                   "auto-approves after each success. Reset sets Load 0 / "
+                   "Save 1 without queuing. Load, Save, and this node must "
+                   "sit in the same canvas group or the buttons do nothing.")
+
+    def noop(self):
+        return ()
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1046,10 +1079,12 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3MotionContextTrim": MiniMaxH3MotionContextTrim,
     "MiniMaxH3MotionContextSaveLatent": MiniMaxH3MotionContextSaveLatent,
     "MiniMaxH3MotionContextLoadLatent": MiniMaxH3MotionContextLoadLatent,
+    "MiniMaxH3MotionContextChain": MiniMaxH3MotionContextChain,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContext": "H3 Motion Context",
     "MiniMaxH3MotionContextTrim": "H3 Motion Context Trim",
     "MiniMaxH3MotionContextSaveLatent": "H3 Motion Context Save Latent",
     "MiniMaxH3MotionContextLoadLatent": "H3 Motion Context Load Latent",
+    "MiniMaxH3MotionContextChain": "H3 Motion Context Chain",
 }

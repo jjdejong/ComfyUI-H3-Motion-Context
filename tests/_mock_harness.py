@@ -1,80 +1,51 @@
-"""Standalone harness for patch_layout, no ComfyUI and no GPU needed.
+"""Standalone harness for layout_contract, no ComfyUI and no GPU needed.
 
 Fakes `comfy.ldm.minimax.model` with a PackedLayout that reproduces the
-structure of the real one in comfy/ldm/minimax/model.py:
+structure of the real one in comfy/ldm/minimax/model.py as of ComfyUI
+0.33:
 
-  segment order   text, then keyframe cond rows, then reference blocks,
-                  then target audio, then target video. Reference blocks
-                  come AFTER the keyframe rows, and the target rows are
+  segment order   text, then keyframe rows, then reference blocks, then
+                  target audio, then target video. The target rows are
                   always the last two segments.
-  segment kinds   text / cond / ref_img / ref_audio / audio / video
+  segment kinds   text / cond / cond_audio / ref_img / ref_audio /
+                  audio / video
   position_ids    [S, 3] float64, columns (t, h, w)
-  cond rows       one segment per keyframe, at STOCK coordinates computed
-                  from text_len and NOT from the reference cursor, which
-                  is the uncompensated behaviour the patch exists to fix,
-                  and rejecting interior anchors
+  origin          the target timeline starts past the span of every
+                  reference block, and keyframe anchors are measured from
+                  there, so stock compensates anchors for references
+  keyframe rows   cond_t = origin + FRAME_RESCALE * resolved_frame_index.
+                  A keyframe emits a cond segment only if it carries a
+                  video latent, sized by that latent's step count, and a
+                  cond_audio segment only if it carries an audio latent,
+                  running FORWARD from cond_t for as many steps as the
+                  latent has.
   references      laid out from a cursor starting at text_len:
-                    image        one ref_img segment of (h//2)*(w//2)
-                                 rows, all on the cursor; cursor += 1
+                    image        one ref_img segment, cursor += 1
                     audio        one ref_audio segment of rt*2 rows,
-                                 channel-major stereo, coordinates
-                                 cursor..cursor+rt-1 once per channel;
-                                 cursor += rt. Skipped entirely when rt
-                                 is 0, which still advances.
+                                 channel-major stereo; cursor += rt, and
+                                 the segment is skipped when rt is 0
                     video,       ref_audio then ref_img, both sharing the
                     video_audio  cursor origin; cursor advances by
                                  max(rt, sum of the video spans)
-  target          audio rows from the final cursor, then video rows whose
-                  first row sits exactly on it
 
-An earlier version of this file put references before the cond rows, used
-four position columns and labelled every reference block `ref`. All three
-were wrong, and stopped mattering only because nothing read the segment
-table. Anything that does read it needs this to be faithful.
-
-`make_mm(modern=True)` builds the ComfyUI 0.33 shape instead. It differs
-in four ways that the patch has to cope with:
-
-  no frame_count   the constructor lost the parameter along with the
-                   first/last restriction it policed
-  cursor first     the target origin is worked out from the reference
-                   spans BEFORE the keyframes are laid out, so stock
-                   compensates anchors for references by itself
-  general formula  cond_t = cursor + FRAME_RESCALE * resolved_frame_index
-                   at every index, interior ones included
-  latent driven    a keyframe emits a cond segment only if it carries a
-                   video latent, sized by that latent's step count, and a
-                   separate cond_audio segment if it carries an audio one
+The pack no longer patches any of this. What it needs is that the
+keyframe line above stays literal for a fractional, negative index, which
+is how the pinned audio window is made to END at the join. No stock node
+can produce such an index, so nothing upstream tests it. The mutation
+knobs on make_mm are the ways that could plausibly stop being true, and
+every one of them must be caught.
 
 Checks:
-  1. apply_patch succeeds against the faithful layout
-  2. interior anchors build, and reference compensation lands
-  3. the marked audio block moves onto the target timeline while a
-     Ref2VA graph's own references stay put
-  4. the mixed stock/MC keyframe guard trips
-  5. a layout emitting the wrong number of rows for an audio reference is
-     caught rather than silently half-moved
-  6. a layout whose reference cursor advances differently still produces
-     correctly aligned output, because nothing here recomputes it
-  7. a second copy of the patch, as another pack vendoring the same file
-     would load, stands down instead of wrapping the first copy
-  8. a DIFFERENT copy (a fork, or a version predating the marker) is also
-     recognised and stood down for
-  9. a wrapper from an unrelated pack solving the same problem its own
-     way is recognised too, and refused rather than stacked on. Several
-     H3 packs lift the same restriction independently and they cannot
-     both own the constructor.
- 10. the patch applies against the 0.33 constructor and recognises which
-     shape it is looking at
- 11. anchors and the audio move land on identical coordinates under both
-     shapes, so a graph produces the same render either side of the
-     ComfyUI update
- 12. a stock Add Guide anchor sharing the graph contributes a cond_audio
-     segment and no cond segment. The anchors must still pair with the
-     right rows and the guide's own rows must be left where stock put them
- 13. the mixed-keyframe guard is retired on 0.33, where stock compensates
-     untagged keyframes itself, rather than refusing a legitimate graph
- 14. the audio row count check still bites on 0.33
+  1. the contract passes against a faithful 0.33 layout
+  2. an integer cast on the anchor index is caught
+  3. an audio window anchored at its end rather than its start is caught
+  4. a layout that stops compensating anchors for references is caught
+  5. a changed audio row count is caught
+  6. the older constructor is refused by signature, before anything is
+     built, with a message that describes the layout rather than naming a
+     ComfyUI version, and points at the pack version that runs on both
+  7. the failure is remembered, so a second render does not re-run the
+     checks and does not fail silently either
 """
 
 import importlib
@@ -84,8 +55,7 @@ import types
 
 import numpy as np
 
-# load_patch imports patch_layout by name, so the package dir has to be on
-# sys.path. Running this file directly puts tests/ there, not the package
+# the package dir has to be on sys.path so layout_contract imports by name
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
@@ -101,8 +71,8 @@ def _video_t_spans(latent_t):
 def _frame_grid(h, w):
     """[n, 2] (h, w) coordinates for one latent frame's 2x2-patch rows.
 
-    The values only have to be deterministic and shaped right; the patch
-    never writes these columns, it only has to leave them alone.
+    The values only have to be deterministic and shaped right; nothing
+    under test reads these columns.
     """
     n_h, n_w = h // 2, w // 2
     hh, ww = np.meshgrid(np.arange(n_h, dtype=np.float64),
@@ -132,23 +102,22 @@ def _video_grid(vt, frame, cursor):
     return g.reshape(-1, 3)
 
 
-class FakeLatent:
-    """Stands in for a latent. The layout reads only its shape."""
-
-    def __init__(self, shape):
-        self.shape = shape
-
-
-def make_mm(ref_advance_factor=1.0, audio_rows_per_step=2, modern=False):
+def make_mm(audio_rows_per_step=2, int_index=False, audio_anchor="start",
+            compensate_refs=True, legacy=False):
     """Build a fake comfy.ldm.minimax.model.
 
-    modern=True builds the ComfyUI 0.33 constructor instead of the 0.32
-    one. Both are here rather than one replacing the other: the pack has
-    to keep working on both, and the point of check 11 is that they agree.
+    Defaults reproduce ComfyUI 0.33. Each other argument breaks one
+    property the pack depends on:
 
-    ref_advance_factor != 1 simulates an upstream change to how an audio
-    reference advances the cursor. audio_rows_per_step != 2 simulates a
-    change to how many rows one audio latent step occupies.
+      int_index          upstream adds a cast, and the fractional audio
+                         index silently rounds
+      audio_anchor="end" the audio window is measured from its end rather
+                         than its start, so it runs the wrong way
+      compensate_refs    False puts the 0.32 behaviour back, where anchors
+                         are computed from text_len and references slide
+                         them relative to the target
+      audio_rows_per_step  a change to how many rows one audio step takes
+      legacy             the 0.32 constructor, frame_count and all
     """
     mm = types.ModuleType("comfy.ldm.minimax.model")
     mm.FRAME_RESCALE = FRAME_RESCALE
@@ -156,13 +125,11 @@ def make_mm(ref_advance_factor=1.0, audio_rows_per_step=2, modern=False):
     mm._video_t_spans = _video_t_spans
 
     def _ref_t_span(blk):
-        # must agree with what the reference loop below actually does,
-        # including the simulated drift, or the fake is not self-consistent
         kind = blk["kind"]
         if kind == "image":
             return 1.0
         if kind == "audio":
-            return float(blk["ref_audio_t"]) * ref_advance_factor
+            return float(blk["ref_audio_t"])
         if kind in ("video", "video_audio"):
             return max(float(blk["ref_audio_t"]),
                        sum(_video_t_spans(blk["latent_t"])))
@@ -170,111 +137,107 @@ def make_mm(ref_advance_factor=1.0, audio_rows_per_step=2, modern=False):
 
     def _build(self, text_len, latent_t, latent_h, latent_w, audio_t,
                keyframes, refs, frame_count):
-            frame = _frame_grid(latent_h, latent_w)
-            frame_rows = frame.shape[0]
-            segs, blocks = [], []
+        frame = _frame_grid(latent_h, latent_w)
+        frame_rows = frame.shape[0]
+        segs, blocks = [], []
 
-            def emit(kind, g):
-                segs.append((kind, g.shape[0]))
-                blocks.append(g)
+        def emit(kind, g):
+            segs.append((kind, g.shape[0]))
+            blocks.append(g)
 
-            g = np.zeros((text_len, 3), dtype=np.float64)
-            g[:, 0] = np.arange(text_len, dtype=np.float64)
-            emit("text", g)
+        g = np.zeros((text_len, 3), dtype=np.float64)
+        g[:, 0] = np.arange(text_len, dtype=np.float64)
+        emit("text", g)
 
-            spans = _video_t_spans(latent_t)
-            # 0.33 works the target origin out before laying the anchors
-            # down, so they are compensated for references by stock itself
-            origin = float(text_len)
-            if modern:
-                for blk in (refs or []):
-                    origin += _ref_t_span(blk)
+        origin = float(text_len)
+        if compensate_refs:
+            for blk in (refs or []):
+                origin += _ref_t_span(blk)
 
-            for kf in (keyframes or []):
-                p = kf["resolved_frame_index"]
-                if modern:
-                    cond_t = origin + FRAME_RESCALE * p
-                    video_latent = kf.get("latent")
-                    if video_latent is not None:
-                        emit("cond", _video_grid(video_latent.shape[2],
-                                                 frame, cond_t))
-                    audio_latent = kf.get("audio_latent")
-                    if audio_latent is not None:
-                        emit("cond_audio",
-                             _audio_grid(cond_t, audio_latent.shape[-1],
-                                         audio_rows_per_step))
-                    continue
-                # faithful 0.32 stock: computed from text_len, NOT the
-                # cursor, and refusing anything but the two endpoints
+        for kf in (keyframes or []):
+            p = kf["resolved_frame_index"]
+            if legacy:
                 if p == 0:
-                    t = float(text_len)
+                    cond_t = float(text_len)
                 elif frame_count is not None and p == frame_count - 1:
-                    t = float(text_len) + sum(spans) - FRAME_RESCALE
+                    cond_t = (float(text_len) + sum(_video_t_spans(latent_t))
+                              - FRAME_RESCALE)
                 else:
                     raise ValueError(
                         "only first/last keyframe anchors are supported")
                 g = np.empty((frame_rows, 3), dtype=np.float64)
-                g[:, 0] = t
+                g[:, 0] = cond_t
                 g[:, 1:] = frame
                 emit("cond", g)
+                continue
+            if int_index:
+                p = int(p)
+            cond_t = origin + FRAME_RESCALE * p
+            video_latent = kf.get("latent")
+            if video_latent is not None:
+                emit("cond", _video_grid(video_latent.shape[2], frame, cond_t))
+            audio_latent = kf.get("audio_latent")
+            if audio_latent is not None:
+                rt = audio_latent.shape[-1]
+                start = cond_t if audio_anchor == "start" else cond_t - rt
+                emit("cond_audio", _audio_grid(start, rt, audio_rows_per_step))
 
-            cursor = float(text_len)
-            for blk in (refs or []):
-                kind = blk["kind"]
-                if kind == "image":
-                    r_frame = _frame_grid(blk["latent_h"], blk["latent_w"])
-                    g = np.empty((r_frame.shape[0], 3), dtype=np.float64)
-                    g[:, 0] = cursor
-                    g[:, 1:] = r_frame
-                    emit("ref_img", g)
-                    cursor += 1.0
-                elif kind == "audio":
-                    rt = int(blk["ref_audio_t"])
-                    if rt > 0:
-                        emit("ref_audio",
-                             _audio_grid(cursor, rt, audio_rows_per_step))
-                    cursor += float(rt) * ref_advance_factor
-                elif kind in ("video", "video_audio"):
-                    rt = int(blk["ref_audio_t"])
-                    vt = int(blk["latent_t"])
-                    r_frame = _frame_grid(blk["latent_h"], blk["latent_w"])
-                    if rt > 0:
-                        emit("ref_audio",
-                             _audio_grid(cursor, rt, audio_rows_per_step))
-                    emit("ref_img", _video_grid(vt, r_frame, cursor))
-                    cursor += max(float(rt), sum(_video_t_spans(vt)))
-                else:
-                    raise ValueError("mock: unsupported ref kind %r" % kind)
+        cursor = float(text_len)
+        for blk in (refs or []):
+            kind = blk["kind"]
+            if kind == "image":
+                r_frame = _frame_grid(blk["latent_h"], blk["latent_w"])
+                g = np.empty((r_frame.shape[0], 3), dtype=np.float64)
+                g[:, 0] = cursor
+                g[:, 1:] = r_frame
+                emit("ref_img", g)
+                cursor += 1.0
+            elif kind == "audio":
+                rt = int(blk["ref_audio_t"])
+                if rt > 0:
+                    emit("ref_audio",
+                         _audio_grid(cursor, rt, audio_rows_per_step))
+                cursor += float(rt)
+            elif kind in ("video", "video_audio"):
+                rt = int(blk["ref_audio_t"])
+                vt = int(blk["latent_t"])
+                r_frame = _frame_grid(blk["latent_h"], blk["latent_w"])
+                if rt > 0:
+                    emit("ref_audio",
+                         _audio_grid(cursor, rt, audio_rows_per_step))
+                emit("ref_img", _video_grid(vt, r_frame, cursor))
+                cursor += max(float(rt), sum(_video_t_spans(vt)))
+            else:
+                raise ValueError("mock: unsupported ref kind %r" % kind)
 
-            # target audio then target video, always the last two segments
-            emit("audio", _audio_grid(cursor, audio_t))
-            emit("video", _video_grid(latent_t, frame, cursor))
+        # target audio then target video, always the last two segments
+        emit("audio", _audio_grid(cursor, audio_t))
+        emit("video", _video_grid(latent_t, frame, cursor))
 
-            seg_abs, off = [], 0
-            for kind, n in segs:
-                seg_abs.append((off, off + n, kind))
-                off += n
-            self.segments = seg_abs
-            self.seq_len = off
-            self.position_ids = np.concatenate(blocks)
+        seg_abs, off = [], 0
+        for kind, n in segs:
+            seg_abs.append((off, off + n, kind))
+            off += n
+        self.segments = seg_abs
+        self.seq_len = off
+        self.position_ids = np.concatenate(blocks)
 
-    # Two real signatures over one body, not one signature with **kwargs.
-    # The patch decides which ComfyUI it is on by inspecting this
-    # signature, and it has to raise the same TypeError 0.33 raises, so
-    # the difference has to be genuine.
-    if modern:
-        class PackedLayout:
-            def __init__(self, text_len, latent_t, latent_h, latent_w,
-                         audio_t, keyframes=None, refs=None):
-                _build(self, text_len, latent_t, latent_h, latent_w, audio_t,
-                       keyframes, refs, None)
-    else:
+    # Two real signatures, not one with **kwargs: the pack decides whether
+    # this ComfyUI is too old by inspecting the signature, and 0.33 has to
+    # raise a real TypeError on frame_count.
+    if legacy:
         class PackedLayout:
             def __init__(self, text_len, latent_t, latent_h, latent_w,
                          audio_t, keyframes=None, refs=None,
                          frame_count=None):
                 _build(self, text_len, latent_t, latent_h, latent_w, audio_t,
                        keyframes, refs, frame_count)
+    else:
+        class PackedLayout:
+            def __init__(self, text_len, latent_t, latent_h, latent_w,
+                         audio_t, keyframes=None, refs=None):
+                _build(self, text_len, latent_t, latent_h, latent_w, audio_t,
+                       keyframes, refs, None)
 
     mm.PackedLayout = PackedLayout
     return mm
@@ -300,7 +263,7 @@ def make_torch():
     return t
 
 
-def load_patch(mm):
+def load_contract(mm):
     for name in ("comfy", "comfy.ldm", "comfy.ldm.minimax"):
         sys.modules.setdefault(name, types.ModuleType(name))
     sys.modules["comfy.ldm.minimax.model"] = mm
@@ -308,293 +271,102 @@ def load_patch(mm):
     sys.modules["comfy.ldm"].minimax = sys.modules["comfy.ldm.minimax"]
     sys.modules["comfy.ldm.minimax"].model = mm
     sys.modules["torch"] = make_torch()
-    sys.modules.pop("patch_layout", None)
-    return importlib.import_module("patch_layout")
+    sys.modules.pop("layout_contract", None)
+    return importlib.import_module("layout_contract")
 
 
-TEXT_LEN, LATENT_T, LH, LW, AUDIO_T = 7, 7, 22, 38, 16
-FC = sum(FRAME_PER_TOKEN[k % 5] for k in range(LATENT_T))
-# 0.33 sizes a cond segment from the keyframe's own latent and emits
-# nothing for a keyframe without one. 0.32 never looks at the key, so the
-# same keyframes drive both shapes.
-VIDEO_STUB = FakeLatent((1, 1, 1, LH, LW))
-
-
-def _cond_ts(layout):
-    return [float(layout.position_ids[a, 0])
-            for a, _, k in layout.segments if k == "cond"]
+def _refused(mm, label, expect):
+    """The contract must refuse this layout, for the stated reason."""
+    lc = load_contract(mm)
+    try:
+        lc.ensure()
+    except RuntimeError as e:
+        assert expect in str(e), "%s: wrong reason: %s" % (label, e)
+        assert not lc.is_checked()
+        return str(e)
+    raise AssertionError("%s: the contract accepted it" % label)
 
 
 def main():
-    # 1. faithful stock: patch must apply
+    # 1. faithful 0.33: the checks must pass and stay passed
     mm = make_mm()
-    pl = load_patch(mm)
-    assert pl.apply_patch(), "self-test failed against faithful stock"
-    assert pl.is_applied()
-    print("1. self-test passes against the faithful stock layout")
+    lc = load_contract(mm)
+    lc.ensure()
+    assert lc.is_checked()
+    lc.ensure()  # second call is a no-op, not a second layout build
+    print("1. contract passes against a faithful ComfyUI 0.33 layout")
 
-    # 2. interior anchors build, reference compensation lands
-    run = [{"resolved_frame_index": 0, pl.MC_KEY: i, "latent": VIDEO_STUB}
-           for i in range(4)]
-    lay = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                          keyframes=run, frame_count=FC)
-    ts = _cond_ts(lay)
-    exp = [TEXT_LEN + FRAME_RESCALE * i for i in range(4)]
-    assert np.allclose(ts, exp), (ts, exp)
-    ref = [{"kind": "audio", "ref_audio_t": 8}]
-    lay2 = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                           keyframes=run, refs=ref, frame_count=FC)
-    ts2 = _cond_ts(lay2)
-    assert np.allclose(ts2, [t + 8.0 for t in ts]), (ts, ts2)
-    print("2. interior run at", [round(t, 4) for t in ts],
-          "-> with an 8-step reference", [round(t, 4) for t in ts2])
+    # 2. an int cast on the anchor index. The video anchors are whole
+    # numbers and survive it, so only the audio window moves, which is
+    # exactly the silent breakage this check exists for.
+    _refused(make_mm(int_index=True), "int cast",
+             "fractional or negative resolved_frame_index")
+    print("2. an integer cast on the anchor index is caught")
 
-    # 3. Ref2VA: the graph's own references survive the audio move intact.
-    # The marked block sits third of four, not last, because locating it
-    # by segment does not depend on where in the list it is.
-    rt, end_frame = 8, 22
-    head = [
-        {"kind": "image", "latent_h": 8, "latent_w": 12},
-        {"kind": "video_audio", "latent_h": 8, "latent_w": 12,
-         "latent_t": 3, "ref_audio_t": 5},
-    ]
-    tail = [{"kind": "audio", "ref_audio_t": 3}]
-    marked = {"kind": "audio", "ref_audio_t": rt, pl.MC_AUDIO_KEY: end_frame}
-    plain = {"kind": "audio", "ref_audio_t": rt}
-    refs_plain = head + [plain] + tail
-    refs_marked = head + [marked] + tail
+    # 3. the window measured from its end instead of its start: it would
+    # run forwards from the join instead of backwards into it
+    _refused(make_mm(audio_anchor="end"), "audio anchored at end",
+             "pinned audio window")
+    print("3. an audio window anchored at its end is caught")
 
-    base = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                           keyframes=run, refs=refs_plain, frame_count=FC)
-    after = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                            keyframes=run, refs=refs_marked, frame_count=FC)
-    a, b = pl._ref_segment_map(base, refs_plain)[2]["ref_audio"]
-    diff = set(i for i in range(base.position_ids.shape[0])
-               if float(base.position_ids[i, 0])
-               != float(after.position_ids[i, 0]))
-    assert diff == set(range(a, b)), (len(diff), b - a)
-    origin = pl._target_origin(after)
-    got_end = float(after.position_ids[a, 0]) + rt
-    assert abs(got_end - (origin + FRAME_RESCALE * end_frame)) < 1e-9
-    ts3 = _cond_ts(after)
-    assert np.allclose(
-        ts3, [origin + FRAME_RESCALE * i for i in range(4)]), ts3
-    print("3. marked block (3rd of 4 references) ends at target frame %d; "
-          "the image, video and audio references either side of it did not "
-          "move" % end_frame)
+    # 4. references stop compensating the anchors, as they did on 0.32
+    _refused(make_mm(compensate_refs=False), "no ref compensation",
+             "moved the anchors relative to the target")
+    print("4. a layout that stops compensating anchors for references is "
+          "caught")
 
-    # 4. mixed stock/MC keyframes under a reference are rejected
-    mixed = [{"resolved_frame_index": 0},
-             {"resolved_frame_index": 0, pl.MC_KEY: 2}]
-    try:
-        mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                        keyframes=mixed, refs=ref, frame_count=FC)
-    except RuntimeError as e:
-        assert "mixed" in str(e)
-        print("4. mixed stock/MC keyframes under a reference rejected loudly")
-    else:
-        raise AssertionError("mixed keyframes under a reference not rejected")
+    # 5. a changed audio row count: the window is no longer the shape the
+    # placement assumes
+    _refused(make_mm(audio_rows_per_step=3), "audio rows",
+             "rows for")
+    print("5. a changed audio row count is caught")
 
-    # 5. an audio block with an unexpected row count must be caught, not
-    # half-moved. The count is asserted exactly, so 3 rows per step trips.
-    bad_rows = make_mm(audio_rows_per_step=3)
-    pl_bad = load_patch(bad_rows)
-    assert not pl_bad.apply_patch(), \
-        "self-test passed against a changed audio row count"
-    assert bad_rows.PackedLayout.__init__.__name__ != "_patched_init"
-    print("5. changed audio row count caught, patch refused")
+    # 6. the older constructor: refused by signature, before anything is
+    # built. The message must describe the LAYOUT, not guess a ComfyUI
+    # version. A wrapper's signature is not ComfyUI's, and the new layout
+    # sat on master unreleased for a while, so a version number inferred
+    # here would have been wrong in both directions.
+    msg = _refused(make_mm(legacy=True), "legacy", "older H3 layout")
+    assert "0.3.1" in msg, msg
+    assert "0.32" not in msg, "the refusal is guessing a ComfyUI version: %s" % msg
+    print("6. the older constructor refused by signature, pointing at pack "
+          "0.3.1 without guessing a ComfyUI version")
 
-    # 6. a changed reference cursor advance must NOT break anything. The
-    # target origin is read back from the layout rather than recomputed,
-    # so the anchors and the audio window follow it wherever it goes. The
-    # previous implementation kept its own copy of that arithmetic and
-    # had no choice but to refuse.
-    drift = make_mm(ref_advance_factor=2.0)
-    pl_drift = load_patch(drift)
-    assert pl_drift.apply_patch(), \
-        "a changed reference advance should no longer defeat the patch"
-    only = [dict(marked)]
-    lay_d = drift.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                               keyframes=run, refs=only, frame_count=FC)
-    origin_d = pl_drift._target_origin(lay_d)
-    ts_d = _cond_ts(lay_d)
-    assert np.allclose(
-        ts_d, [origin_d + FRAME_RESCALE * i for i in range(4)]), ts_d
-    a_d, _ = pl_drift._ref_segment_map(lay_d, only)[0]["ref_audio"]
-    end_d = float(lay_d.position_ids[a_d, 0]) + rt
-    assert abs(end_d - (origin_d + FRAME_RESCALE * end_frame)) < 1e-9
-    print("6. doubled reference advance: anchors and audio window still "
-          "land correctly, because the origin is read and not recomputed")
+    # 7. a failure is remembered. The node calls ensure() on every render,
+    # and the second call must raise the same way rather than quietly
+    # passing because some module state got left behind.
+    lc_bad = load_contract(make_mm(int_index=True))
+    for attempt in (1, 2):
+        try:
+            lc_bad.ensure()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("attempt %d did not raise" % attempt)
+    assert not lc_bad.is_checked()
+    print("7. a failed check stays failed on the next render")
 
-    # 7. two packs vendoring this file: the second must stand down, and
-    # the first must still own the constructor and still work.
-    mm7 = make_mm()
-    first = load_patch(mm7)
-    assert first.apply_patch()
-    installed = mm7.PackedLayout.__init__
+    # 8. the case that actually bit: another pack vendoring this project's
+    # old layout patch wraps the constructor, and that wrapper's signature
+    # carries frame_count on EVERY ComfyUI. Read naively it looks exactly
+    # like the older layout, and the user gets told to update a ComfyUI
+    # that is already current. Behaviour has to decide, not the signature.
+    mm = make_mm()
+    stock_init = mm.PackedLayout.__init__
 
-    sys.modules.pop("patch_layout", None)
-    second = importlib.import_module("patch_layout")
-    assert second is not first, "second load returned the same module object"
-    assert second.apply_patch(), \
-        "standing down should report success, the patch IS active"
-    assert second.is_applied(), \
-        "is_applied must be true when another pack owns the patch, or the "\
-        "second pack's nodes would refuse to run"
-    assert mm7.PackedLayout.__init__ is installed, \
-        "the second copy wrapped the first instead of standing down"
-    assert second._orig_init is None, "the second copy captured an original"
+    def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
+                      keyframes=None, refs=None, frame_count=None):
+        stock_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
+                   keyframes=keyframes, refs=refs)
 
-    lay7 = mm7.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                            keyframes=run, refs=[dict(marked)], frame_count=FC)
-    origin7 = first._target_origin(lay7)
-    ts7 = _cond_ts(lay7)
-    assert np.allclose(
-        ts7, [origin7 + FRAME_RESCALE * i for i in range(4)]), ts7
-    a7, _ = first._ref_segment_map(lay7, [marked])[0]["ref_audio"]
-    end7 = float(lay7.position_ids[a7, 0]) + rt
-    assert abs(end7 - (origin7 + FRAME_RESCALE * end_frame)) < 1e-9
-    print("7. second copy of the patch stands down, first still owns the "
-          "constructor and still places anchors and audio correctly")
-
-    # 8. a wrapper from a different copy carries no marker, only the
-    # name. It must still be recognised, or the second copy self-tests
-    # through the first one's behaviour and refuses over a limitation
-    # that may not exist in its own code.
-    mm8 = make_mm()
-    other = load_patch(mm8)
-    assert other.apply_patch()
-    wrapper = mm8.PackedLayout.__init__
-    try:
-        delattr(wrapper, other.PATCH_MARKER)     # simulate an older copy
-    except AttributeError:
-        raise AssertionError("the wrapper was never marked")
-    assert not getattr(wrapper, other.PATCH_MARKER, False)
-    assert wrapper.__name__ == "_patched_init"
-
-    sys.modules.pop("patch_layout", None)
-    mine = importlib.import_module("patch_layout")
-    assert mine._already_patched() == "other", mine._already_patched()
-    assert mine.apply_patch(), "an unmarked copy must still be stood down for"
-    assert mine.is_applied()
-    assert mm8.PackedLayout.__init__ is wrapper, "wrapped a foreign copy"
-    assert mine._orig_init is None
-    print("8. an unmarked copy of the patch (older version or fork) is "
-          "recognised by name and stood down for, not wrapped")
-
-    # 9. an unrelated pack's wrapper: no marker, a different name, and
-    # defined somewhere other than the module PackedLayout lives in.
-    mm9 = make_mm()
-    stock_init = mm9.PackedLayout.__init__
-    assert stock_init.__module__ == mm9.PackedLayout.__module__
-
-    def _some_other_pack_init(self, *args, **kwargs):
-        stock_init(self, *args, **kwargs)
-    _some_other_pack_init.__module__ = "some_other_h3_pack.patches"
-    mm9.PackedLayout.__init__ = _some_other_pack_init
-
-    ours = load_patch(mm9)
-    assert ours._already_patched() == "foreign", ours._already_patched()
-    assert not ours.apply_patch(), \
-        "stacked on an unrelated pack's wrapper instead of refusing"
-    assert not ours.is_applied()
-    assert mm9.PackedLayout.__init__ is _some_other_pack_init, \
-        "replaced another pack's wrapper"
-
-    # functools.wraps copies __module__ and __name__ across, so the
-    # module check alone would miss it; __wrapped__ is the giveaway
-    import functools
-    mm10 = make_mm()
-    orig10 = mm10.PackedLayout.__init__
-
-    @functools.wraps(orig10)
-    def _wrapped_init(self, *args, **kwargs):
-        orig10(self, *args, **kwargs)
-    mm10.PackedLayout.__init__ = _wrapped_init
-    assert _wrapped_init.__module__ == mm10.PackedLayout.__module__
-    ours2 = load_patch(mm10)
-    assert ours2._already_patched() == "foreign", ours2._already_patched()
-    assert not ours2.apply_patch()
-    print("9. an unrelated pack's wrapper is detected and refused, whether "
-          "it hides behind functools.wraps or not")
-
-    modern_checks(run, marked, refs_marked, rt, end_frame, ts3)
+    mm.PackedLayout.__init__ = _patched_init
+    lc = load_contract(mm)
+    lc.ensure()
+    assert lc.is_checked(), "a wrapped constructor was mistaken for the old layout"
+    print("8. a vendored copy of the old patch wrapping the constructor does "
+          "not get mistaken for an older ComfyUI")
 
     print("all checks passed")
-
-
-def modern_checks(run, marked, refs_marked, rt, end_frame, legacy_ts):
-    """The same patch against the ComfyUI 0.33 constructor.
-
-    `legacy_ts` is where the anchors landed under 0.32 in check 3, so the
-    parity assertion compares against a number this file actually measured
-    rather than one it recomputes with the formula under test.
-    """
-    # 10. the constructor that broke 0.3.0 must be recognised, not guessed
-    mm = make_mm(modern=True)
-    pl = load_patch(mm)
-    try:
-        mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                        keyframes=run, frame_count=FC)
-    except TypeError as e:
-        assert "frame_count" in str(e), e
-    else:
-        raise AssertionError("the modern fake still accepts frame_count")
-    assert pl.apply_patch(), "self-test failed against the 0.33 constructor"
-    assert pl._stock_frame_count is False, \
-        "the patch thinks 0.33 still takes frame_count"
-    print("10. 0.33 constructor recognised by signature, patch applied")
-
-    # 11. same graph, same coordinates, either side of the update
-    lay = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                          keyframes=run, refs=refs_marked)
-    origin = pl._target_origin(lay)
-    ts = _cond_ts(lay)
-    assert np.allclose(ts, [origin + FRAME_RESCALE * i for i in range(4)]), ts
-    assert np.allclose(ts, legacy_ts), (ts, legacy_ts)
-    a, _ = pl._ref_segment_map(lay, refs_marked)[2]["ref_audio"]
-    got_end = float(lay.position_ids[a, 0]) + rt
-    assert abs(got_end - (origin + FRAME_RESCALE * end_frame)) < 1e-9, got_end
-    print("11. anchors at %s and the audio window ending at target frame %d, "
-          "identical to the 0.32 result" % ([round(t, 4) for t in ts],
-                                            end_frame))
-
-    # 12. a stock Add Guide anchor in the same graph. It emits cond_audio
-    # and no cond, so pairing cond spans against the raw keyframe list
-    # would miscount and write our coordinates onto its rows.
-    guide = {"resolved_frame_index": 3, "audio_latent": FakeLatent((1, 1, 2, 4))}
-    lay = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                          keyframes=run + [guide], refs=refs_marked)
-    origin = pl._target_origin(lay)
-    assert _cond_ts(lay) == ts, "the stock guide moved our anchors"
-    ca = [(s, e) for s, e, k in lay.segments if k == "cond_audio"]
-    assert len(ca) == 1, lay.segments
-    want = origin + FRAME_RESCALE * 3
-    assert abs(float(lay.position_ids[ca[0][0], 0]) - want) < 1e-9, \
-        "the stock guide's own rows were disturbed"
-    print("12. a stock audio guide alongside ours: our anchors unmoved, its "
-          "cond_audio rows left at target frame 3 where stock put them")
-
-    # 13. the mixed-keyframe guard is 0.32 only. There, stock computed an
-    # untagged keyframe from text_len and never compensated it, so mixing
-    # disagreed under a reference. 0.33 compensates it itself, and refusing
-    # would block a Ref2VA graph carrying a stock anchor.
-    untagged = {"resolved_frame_index": 2, "latent": VIDEO_STUB}
-    lay = mm.PackedLayout(TEXT_LEN, LATENT_T, LH, LW, AUDIO_T,
-                          keyframes=run[:2] + [untagged], refs=[dict(marked)])
-    origin = pl._target_origin(lay)
-    mixed_ts = _cond_ts(lay)
-    assert np.allclose(mixed_ts, [origin, origin + FRAME_RESCALE,
-                                  origin + FRAME_RESCALE * 2]), mixed_ts
-    print("13. mixed stock/MC keyframes accepted on 0.33 and the untagged "
-          "one lands on the same timeline as ours")
-
-    # 14. the row count check has to keep biting on the new shape too
-    bad = make_mm(modern=True, audio_rows_per_step=3)
-    pl_bad = load_patch(bad)
-    assert not pl_bad.apply_patch(), \
-        "self-test passed against a changed audio row count on 0.33"
-    print("14. changed audio row count still caught on 0.33")
 
 
 if __name__ == "__main__":
