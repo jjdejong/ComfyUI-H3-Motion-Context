@@ -23,11 +23,9 @@ from comfy_extras.nodes_custom_sampler import Guider_Basic
 from .nodes import (
     AUDIO_HZ,
     FPS,
-    MC_KEY,
     MiniMaxH3MotionContext,
     MiniMaxH3MotionContextSaveLatent,
-    _ensure_layout_patch,
-    _ensure_payload_patch,
+    _ensure_layout_ok,
     _st_load,
     _pixel_frames,
     _steps_for_frames,
@@ -175,7 +173,10 @@ def _copy_latent(latent, device=None):
 
 
 def _keyframe_position(keyframe):
-    p = keyframe.get(MC_KEY, keyframe.get("resolved_frame_index"))
+    # Accept the marker written by pre-0.34 local versions when recovering a
+    # saved conditioning, then normalize it to ComfyUI's native field below.
+    p = keyframe.get("motion_context_index",
+                     keyframe.get("resolved_frame_index"))
     if p is None:
         raise ValueError(
             "h3_motion_context: a keyframe has no resolved frame index")
@@ -186,7 +187,6 @@ def _conditioning_for_tile(conditioning, tile_index, tiles, frame_count,
                            tile_specific):
     """Keep only the endpoints that belong to this temporal tile."""
     out = []
-    has_keyframes_and_refs = False
     for entry in conditioning:
         copied = list(entry)
         values = entry[1].copy()
@@ -207,14 +207,13 @@ def _conditioning_for_tile(conditioning, tile_index, tiles, frame_count,
                     % (p, source_frame_count))
             if keep:
                 kept = keyframe.copy()
-                kept["resolved_frame_index"] = 0
-                kept[MC_KEY] = target
+                kept.pop("motion_context_index", None)
+                kept["resolved_frame_index"] = target
                 keyframes.append(kept)
 
         if keyframes:
             values["minimax_keyframes"] = keyframes
             values["minimax_frame_count"] = frame_count
-            has_keyframes_and_refs |= bool(values.get("minimax_refs"))
         else:
             values.pop("minimax_keyframes", None)
             values.pop("minimax_frame_count", None)
@@ -222,9 +221,7 @@ def _conditioning_for_tile(conditioning, tile_index, tiles, frame_count,
         out.append(copied)
 
     if any(entry[1].get("minimax_keyframes") for entry in out):
-        _ensure_layout_patch()
-    if has_keyframes_and_refs:
-        _ensure_payload_patch()
+        _ensure_layout_ok()
     return out
 
 

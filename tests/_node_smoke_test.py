@@ -343,28 +343,32 @@ def main():
     looping = sys.modules["h3mc_pkg.looping_sampler"]
     prefix, _, _ = looping._slice_latent_prefix(prev, 107)
     captured.clear()
-    node.apply(
+    got, _ = node.apply(
         conditioning=[["c", {}]], vae=VAE(), latent=target,
         context_frames=context, context_length="22",
         audio_context_length=22, context_latent=prefix)
-    snapped = captured["minimax_refs"][-1][nodes.MC_AUDIO_KEY]
-    assert abs(snapped - 21.6) < 1e-6, snapped
+    captured.update(got[0][1])
+    snapped = audio_kf()
+    snapped_end = (snapped["resolved_frame_index"]
+                   + snapped["audio_latent"].shape[-1] / nodes.FRAME_RESCALE)
+    assert abs(snapped_end - 21.6) < 1e-6, snapped_end
     print("settling prefix: signed negative audio overhang snapped to target grid")
 
     # A looping tile may still have a hard FL2VA endpoint. Motion Context
-    # replaces only its head anchors and must retain, mark and sort the end.
+    # replaces only its head anchors and must retain and sort the end.
     captured.clear()
     endpoint = T(np.ones((1, 16, 1, h, w), dtype=np.float32))
-    node.apply(
+    got, _ = node.apply(
         conditioning=[["c", {"minimax_keyframes": [{
             "resolved_frame_index": frames - 1, "latent": endpoint,
         }], "minimax_frame_count": frames}]],
         vae=VAE(), latent=target, context_length="22",
         audio_context_length=22, context_latent=prev)
+    captured.update(got[0][1])
     merged = captured["minimax_keyframes"]
-    assert len(merged) == 8, len(merged)
-    assert merged[0][nodes.MC_KEY] == frames - 1
-    assert [kf[nodes.MC_KEY] for kf in merged[1:]] == idx
+    assert len(merged) == 9, len(merged)
+    assert merged[0]["resolved_frame_index"] == frames - 1
+    assert [kf["resolved_frame_index"] for kf in merged[1:8]] == idx
     assert merged[0]["resolved_frame_index"] == frames - 1
     print("endpoint merge: motion head retained the stock FL2VA last anchor")
 
@@ -375,11 +379,14 @@ def main():
     tile0 = looping._conditioning_for_tile(base, 0, 3, frames, False)
     tile1 = looping._conditioning_for_tile(base, 1, 3, frames, False)
     tile2 = looping._conditioning_for_tile(base, 2, 3, frames, False)
-    assert [kf[nodes.MC_KEY] for kf in tile0[0][1]["minimax_keyframes"]] == [0]
+    assert [kf["resolved_frame_index"]
+            for kf in tile0[0][1]["minimax_keyframes"]] == [0]
     assert "minimax_keyframes" not in tile1[0][1]
-    assert [kf[nodes.MC_KEY] for kf in tile2[0][1]["minimax_keyframes"]] == [frames - 1]
+    assert [kf["resolved_frame_index"]
+            for kf in tile2[0][1]["minimax_keyframes"]] == [frames - 1]
     local = looping._conditioning_for_tile(base, 1, 3, frames, True)
-    assert [kf[nodes.MC_KEY] for kf in local[0][1]["minimax_keyframes"]] == [frames - 1]
+    assert [kf["resolved_frame_index"]
+            for kf in local[0][1]["minimax_keyframes"]] == [frames - 1]
     print("loop endpoints: global first/final and tile-local final assigned correctly")
 
     # Round against the global AV timeline, not each tile independently.

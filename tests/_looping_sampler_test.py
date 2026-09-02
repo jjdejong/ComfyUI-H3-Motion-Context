@@ -267,9 +267,11 @@ def main():
     assert first_values["prompt"].endswith("Wide road shot.")
     assert second_values["prompt"].endswith("The wagon passes a guardrail.")
     assert "minimax_keyframes" not in first_values
-    assert len(second_values["minimax_keyframes"]) == 7
-    assert len(second_values["minimax_refs"]) == 1
-    assert second_values["minimax_refs"][0]["kind"] == "audio"
+    assert len(second_values["minimax_keyframes"]) == 8
+    audio_keyframes = [keyframe for keyframe in
+                       second_values["minimax_keyframes"]
+                       if "audio_latent" in keyframe]
+    assert len(audio_keyframes) == 1
 
     def anchored(frame_count):
         return [["c", {
