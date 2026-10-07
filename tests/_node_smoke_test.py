@@ -168,16 +168,16 @@ def main():
     sys.modules["safetensors"] = st
     sys.modules["safetensors.torch"] = stt
 
-    # import the package by file location so it works whatever the repo
-    # folder is called (ComfyUI-H3-Motion-Context, h3_motion_context, ...)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "h3mc_pkg", os.path.join(_PKG_DIR, "__init__.py"),
-        submodule_search_locations=[_PKG_DIR])
-    pkg = importlib.util.module_from_spec(spec)
+    # Load as a package so relative imports work whatever the folder is
+    # called (hyphens are not a valid module name).
+    pkg = types.ModuleType("h3mc_pkg")
+    pkg.__path__ = [_PKG_DIR]
+    pkg.__file__ = os.path.join(_PKG_DIR, "__init__.py")
     sys.modules["h3mc_pkg"] = pkg
-    spec.loader.exec_module(pkg)  # registers nodes; patches apply on first run
-    nodes = sys.modules["h3mc_pkg.nodes"]
+    import h3mc_pkg.nodes as nodes
+    import h3mc_pkg.probe_node as probe_node
+    pkg.NODE_CLASS_MAPPINGS = dict(nodes.NODE_CLASS_MAPPINGS)
+    pkg.NODE_CLASS_MAPPINGS.update(probe_node.NODE_CLASS_MAPPINGS)
 
     def audio_kf():
         """The one keyframe carrying pinned audio, from the last apply()."""
@@ -743,6 +743,26 @@ def main():
         raise AssertionError("auto-numbered file was matched by index")
     print("indexed slots: re-roll overwrites its slot, loads previous "
           "clip's latent; auto mode confirmed to return the reject")
+
+    import shutil
+    td = os.path.join(outdir, "clear_test")
+    os.makedirs(td)
+    try:
+        open(os.path.join(td, "clip_00001.safetensors"), "wb").close()
+        open(os.path.join(td, "clip_00002.safetensors"), "wb").close()
+        open(os.path.join(td, "hero_take.safetensors"), "wb").close()
+        open(os.path.join(td, "keep_me.txt"), "w").write("x")
+        assert nodes._clip_slot_exists(td, 1)
+        assert nodes._clip_slot_exists(td, 2)
+        assert not nodes._clip_slot_exists(td, 3)
+        n = nodes._clear_clip_slots(td)
+        assert n == 2, n
+        assert not nodes._clip_slot_exists(td, 1)
+        assert os.path.exists(os.path.join(td, "keep_me.txt"))
+        assert os.path.exists(os.path.join(td, "hero_take.safetensors"))
+    finally:
+        shutil.rmtree(td)
+    print("reset clear: numbered slots gone, custom names left alone")
 
     print("smoke test passed")
 
