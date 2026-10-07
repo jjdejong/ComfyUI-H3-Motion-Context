@@ -176,6 +176,7 @@ def main():
     sys.modules["h3mc_pkg"] = pkg
     import h3mc_pkg.nodes as nodes
     import h3mc_pkg.probe_node as probe_node
+    import h3mc_pkg.looping_sampler
     pkg.NODE_CLASS_MAPPINGS = dict(nodes.NODE_CLASS_MAPPINGS)
     pkg.NODE_CLASS_MAPPINGS.update(probe_node.NODE_CLASS_MAPPINGS)
 
